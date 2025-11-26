@@ -357,16 +357,6 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             tmp_file.write(content)
             tmp_webm_path = tmp_file.name
 
-        # Save a copy of the recording for debugging
-        import datetime
-        debug_dir = Path(__file__).parent / "debug_recordings"
-        debug_dir.mkdir(exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        debug_webm_path = debug_dir / f"recording_{timestamp}.webm"
-        with open(debug_webm_path, "wb") as f:
-            f.write(content)
-        print(f"💾 Saved debug recording to: {debug_webm_path}")
-
         # Log audio file details
         audio_size_kb = len(content) / 1024
         print(f"📊 Audio file size: {audio_size_kb:.2f} KB ({len(content)} bytes)")
@@ -392,11 +382,6 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             else:
                 tmp_file_path = tmp_wav_path
                 print(f"✅ Converted to WAV: {os.path.getsize(tmp_wav_path) / 1024:.2f} KB")
-                # Save a copy of the WAV for debugging
-                debug_wav_path = debug_dir / f"recording_{timestamp}.wav"
-                import shutil
-                shutil.copy(tmp_wav_path, debug_wav_path)
-                print(f"💾 Saved debug WAV to: {debug_wav_path}")
         except FileNotFoundError:
             print("⚠️  FFmpeg not found, using WebM directly")
             tmp_file_path = tmp_webm_path
