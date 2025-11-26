@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.43.1",
     "beautifulsoup4>=4.14.2",
+    "cloudscraper>=1.2.71",
     "fastapi>=0.121.2",
     "faster-whisper>=1.2.1",
     "fastmcp>=2.13.0.2",

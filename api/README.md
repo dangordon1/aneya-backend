@@ -1,4 +1,4 @@
-#  aneya API - Vercel Serverless Functions
+# Aneya API - Vercel Serverless Functions
 
 This directory contains the serverless-adapted FastAPI backend for Aneya, designed to run on Vercel's serverless platform.
 
@@ -8,59 +8,45 @@ This directory contains the serverless-adapted FastAPI backend for Aneya, design
 
 ## Key Differences from `api.py`
 
-The serverless version (`api/index.py`) differs from the local development version (`api.py`) in several ways:
+The serverless version (`api/index.py`) differs from the main version (`api.py`) in several ways:
 
-### 1. Client Initialization
-
-**Local (`api.py`)**:
-- Uses FastAPI lifespan context manager
-- Initializes client once on startup
-- Maintains connection throughout app lifecycle
-
-**Serverless (`api/index.py`)**:
-- Lazy initialization via `get_client()` function
-- Client cached across warm starts
-- Reconnects to MCP servers on cold starts
-
-### 2. Logging
-
-**Local**: Verbose logging enabled by default
-
-**Serverless**: Minimal logging to reduce execution time
-
-### 3. CORS Configuration
-
-**Local**: Restricted to `localhost:5173` and `localhost:3000`
-
-**Serverless**: Allows all origins (update for production!)
+| Aspect | Local (`api.py`) | Serverless (`api/index.py`) |
+|--------|------------------|----------------------------|
+| **Initialization** | Lifespan context manager | Lazy `get_client()` function |
+| **Client lifecycle** | Persistent connection | Reconnects on cold starts |
+| **Logging** | Verbose | Minimal (reduces execution time) |
+| **CORS** | Restricted origins | All origins (update for production!) |
+| **Transcription** | NVIDIA Parakeet TDT | Not available (model too large) |
 
 ## Serverless Constraints
 
 ### Execution Timeout
-- **Hobby Plan**: 10 seconds
-- **Pro Plan**: 60 seconds
+| Plan | Timeout |
+|------|---------|
+| Hobby | 10 seconds |
+| Pro | 60 seconds |
 
-Clinical analysis can take 30-60 seconds, so **Pro plan is recommended for production**.
+Clinical analysis typically takes 30-60 seconds, so **Pro plan is recommended**.
 
 ### Cold Starts
 
-First request after inactivity:
-- Imports all dependencies
-- Initializes MCP client
-- Connects to all MCP servers
-- **Total**: 3-5 seconds
+| Phase | Time |
+|-------|------|
+| First request (cold) | 3-5 seconds |
+| Subsequent (warm) | 0.5-1 second |
 
-Subsequent requests (warm):
-- Reuses cached client
-- **Total**: 0.5-1 second for analysis
+Cold start includes:
+- Import dependencies
+- Initialize MCP client
+- Connect to region-specific servers
 
 ### Stateless Architecture
 
-Each function invocation is stateless. The client is cached using a global variable, which persists across warm starts but not cold starts.
+The client is cached via global variable, persisting across warm starts but not cold starts.
 
-## Testing Locally
+## Local Development
 
-You cannot run the serverless version directly. For local development, use:
+You cannot run the serverless version directly. For local development:
 
 ```bash
 # From project root
@@ -69,29 +55,43 @@ python api.py
 
 ## Deployment
 
-This directory is automatically deployed to Vercel as serverless functions. See `VERCEL_DEPLOYMENT.md` for details.
+This directory is automatically deployed to Vercel as serverless functions.
 
 ## API Endpoints
 
 All endpoints are prefixed with `/api` in production:
 
-- **GET /api/** - Health check
-- **GET /api/health** - Detailed health status
-- **POST /api/analyze** - Analyze clinical consultation
-- **GET /api/examples** - Get example cases
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/` | GET | Health check |
+| `/api/health` | GET | Detailed health status |
+| `/api/analyze` | POST | Analyze clinical consultation |
+| `/api/examples` | GET | Get example cases |
+
+**Note:** `/api/transcribe` is not available on Vercel (model too large for serverless).
 
 ## Environment Variables
 
-Required environment variables (set in Vercel dashboard):
+Set in Vercel dashboard:
 
-- `ANTHROPIC_API_KEY` - Your Anthropic API key
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ANTHROPIC_API_KEY` | Yes | Claude API key |
 
 ## Monitoring
 
-View function logs:
-
 ```bash
+# View function logs
 vercel logs <deployment-url>
 ```
 
-Or in Vercel Dashboard: **Deployments** → **Functions** → **View Logs**
+Or via Vercel Dashboard: **Deployments** → **Functions** → **View Logs**
+
+## Recommended: Use Cloud Run Instead
+
+For production with voice transcription, use Google Cloud Run instead of Vercel:
+- Supports NVIDIA Parakeet TDT model
+- Longer timeout (300s)
+- More memory (4Gi)
+
+See main `README.md` for Cloud Run deployment instructions.

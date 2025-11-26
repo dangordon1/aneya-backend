@@ -22,8 +22,8 @@ echo -e "${YELLOW}Testing API at: ${API_URL}${NC}"
 # Test 1: Health check
 echo -e "\n${YELLOW}Test 1: Health Check${NC}"
 HEALTH_RESPONSE=$(curl -s -w "\n%{http_code}" "${API_URL}/health" 2>/dev/null || echo "FAILED\n000")
-HEALTH_CODE=$(echo "$HEALTH_RESPONSE" | tail -n1)
-HEALTH_BODY=$(echo "$HEALTH_RESPONSE" | head -n-1)
+HEALTH_CODE=$(echo "$HEALTH_RESPONSE" | tail -1)
+HEALTH_BODY=$(echo "$HEALTH_RESPONSE" | sed '$d')
 
 if [ "$HEALTH_CODE" = "200" ]; then
     echo -e "${GREEN}✓ Health check passed${NC}"

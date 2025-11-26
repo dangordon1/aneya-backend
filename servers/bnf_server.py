@@ -8,6 +8,7 @@ Uses web scraping to access the BNF website (https://bnf.nice.org.uk/).
 """
 
 import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from typing import Optional, List, Dict, Any
 from fastmcp import FastMCP
@@ -54,44 +55,30 @@ HEADERS = {
     'Upgrade-Insecure-Requests': '1'
 }
 
-# Session for maintaining cookies and connections
+# Use cloudscraper to bypass Cloudflare protection
+# cloudscraper automatically handles Cloudflare challenges without needing external API/proxy
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'mobile': False
+    }
+)
+print("🔄 BNF server using cloudscraper for Cloudflare bypass", file=sys.stderr)
+print("   No external API required - handles Cloudflare challenges locally", file=sys.stderr)
+
+# Legacy session for non-BNF requests if needed
 session = requests.Session()
 session.headers.update(HEADERS)
-
-# Configure ScrapeOps Residential Proxy if API key is provided
-SCRAPEOPS_API_KEY = os.getenv('SCRAPEOPS_API_KEY')
-
-if SCRAPEOPS_API_KEY:
-    # Use ScrapeOps Residential & Mobile Proxy Aggregator (proxy port format)
-    # Add UK geotargeting to bypass BNF's geographic restrictions
-    SCRAPEOPS_PROXY = f"http://scrapeops.country=uk:{SCRAPEOPS_API_KEY}@residential-proxy.scrapeops.io:8181"
-    session.proxies = {
-        'http': SCRAPEOPS_PROXY,
-        'https': SCRAPEOPS_PROXY,
-    }
-    print(f"🔄 BNF server using ScrapeOps Residential Proxy (UK geotargeted)", file=sys.stderr)
-    print(f"   Features: UK residential IPs from 20+ proxy providers", file=sys.stderr)
-else:
-    print("📡 BNF server using direct connection (no proxy)", file=sys.stderr)
-    print("⚠️  WARNING: SCRAPEOPS_API_KEY not set - BNF will likely be blocked on Cloud Run!", file=sys.stderr)
-
-# Legacy proxy support (kept for backwards compatibility with ScraperAPI if needed)
-PROXY_URL = os.getenv('BNF_PROXY_URL')
-if PROXY_URL and not SCRAPEOPS_API_KEY:
-    print(f"🔄 BNF server using legacy proxy: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else PROXY_URL}", file=sys.stderr)
-    session.proxies = {
-        'http': PROXY_URL,
-        'https': PROXY_URL,
-    }
 
 # Initialize cache
 cache = get_cache()
 
 
-def make_request(url: str, timeout: int = 30) -> tuple[Optional[requests.Response], Dict[str, Any]]:
+def make_request(url: str, timeout: int = 60) -> tuple[Optional[requests.Response], Dict[str, Any]]:
     """
     Make a GET request with proper error handling and rate limiting.
-    Uses configured proxy (ScrapeOps residential or legacy) if available.
+    Uses cloudscraper to automatically bypass Cloudflare protection.
 
     Args:
         url: The URL to request
@@ -102,28 +89,17 @@ def make_request(url: str, timeout: int = 30) -> tuple[Optional[requests.Respons
     """
     debug_info = {
         "url": url,
-        "proxy_enabled": bool(session.proxies),
+        "cloudscraper_enabled": True,
         "timeout": timeout
     }
 
     try:
-        # Log proxy status
-        proxy_status = "WITH PROXY" if session.proxies else "NO PROXY"
-        print(f"🌐 [{proxy_status}] Requesting: {url}", file=sys.stderr)
-        if session.proxies:
-            proxy_host = session.proxies.get('https', 'unknown')
-            # Mask credentials in logs
-            if '@' in proxy_host:
-                proxy_display = proxy_host.split('@')[-1]
-            else:
-                proxy_display = proxy_host
-            print(f"   Using proxy: {proxy_display}", file=sys.stderr)
-
         # Add a small delay to be respectful to the server
         time.sleep(0.5)
 
-        # Make request through session (which has proxy configured if available)
-        response = session.get(url, timeout=timeout)
+        # Use cloudscraper which handles Cloudflare challenges automatically
+        print(f"🌐 [CLOUDSCRAPER] Requesting: {url}", file=sys.stderr)
+        response = scraper.get(url, timeout=timeout)
 
         # Log response details
         print(f"✅ Response received: {response.status_code} (size: {len(response.content)} bytes)", file=sys.stderr)

@@ -8,6 +8,18 @@ This directory contains tools for testing the audio transcription endpoint.
 - **`test_transcription.py`** - Tests the `/api/transcribe` endpoint with timing
 - **`test_audio.mp3`** - Generated test audio file (created by `create_test_audio.py`)
 
+## Transcription Model
+
+The API uses **NVIDIA Parakeet TDT 0.6B** for transcription:
+
+| Metric | Parakeet TDT 0.6B | Whisper Small |
+|--------|-------------------|---------------|
+| Latency | ~2s | ~13s |
+| Word Error Rate | ~6% | 14% |
+| Model Size | ~350MB | ~500MB |
+
+Parakeet 0.6B is faster and more accurate than Whisper, with a smaller footprint.
+
 ## Usage
 
 ### Step 1: Generate Test Audio
@@ -27,7 +39,13 @@ In a separate terminal from the project root:
 python api.py
 ```
 
-Wait for the Whisper model to load (you'll see: "✅ Whisper model loaded")
+Wait for the Parakeet model to load:
+```
+🎤 Loading NVIDIA Parakeet TDT 0.6B model for transcription...
+✅ Parakeet TDT model loaded successfully
+```
+
+First load downloads ~350MB from HuggingFace.
 
 ### Step 3: Run the Test
 
@@ -37,16 +55,6 @@ python test_transcription.py
 ```
 
 ## Test Output
-
-The test provides:
-- ✅ API connectivity check
-- 📁 Audio file information
-- ⏱️ **Transcription timing** (how long it took)
-- 📝 Full transcribed text
-- ✅ Quality metrics (word accuracy percentage)
-- Pass/fail status
-
-## Example Output
 
 ```
 ======================================================================
@@ -74,7 +82,7 @@ The test provides:
 
 ## API Endpoint
 
-The test targets: `POST /api/transcribe`
+**POST /api/transcribe**
 
 **Request:**
 - Multipart form data with audio file
@@ -85,16 +93,11 @@ The test targets: `POST /api/transcribe`
 ```json
 {
   "success": true,
-  "text": "transcribed text here"
+  "text": "transcribed text here",
+  "latency_seconds": 2.34,
+  "model": "nvidia/parakeet-tdt-0.6b-v2"
 }
 ```
-
-## Whisper Model
-
-The API uses `faster-whisper` with the "small" model:
-- Fast transcription (typically 2-5 seconds)
-- Good accuracy for English clinical speech
-- CPU-optimized with INT8 quantization
 
 ## Customizing
 
@@ -109,11 +112,20 @@ To test with different audio:
 
 **"Cannot connect to API"**
 - Make sure `python api.py` is running
-- Check that port 8000 is not in use by another process
+- Check that port 8000 is not in use
+
+**"Parakeet model not initialized"**
+- Check if model loaded on startup
+- Requires ~2GB RAM for model
+- May need `pip install nemo_toolkit[asr]`
 
 **"Test audio file not found"**
 - Run `python create_test_audio.py` first
 
 **"Request timed out"**
-- Large audio files may exceed the 30-second timeout
-- Consider using a shorter audio clip for testing
+- Large audio files may exceed timeout
+- Use shorter audio clips for testing
+
+## Note on Deployment
+
+Voice transcription is only available on Cloud Run (not Vercel) due to model size requirements.

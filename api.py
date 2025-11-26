@@ -88,9 +88,7 @@ app.add_middleware(
         "http://localhost:5173",  # Local development
         "http://localhost:5174",  # Local development (alternative port)
         "http://localhost:3000",
-        "https://*.vercel.app",  # Vercel deployments
         "https://aneya.vercel.app",  # Production frontend
-        "https://aneya-qy2d3acnx-daniel-gordons-projects-ec39af4d.vercel.app",  # Old production
     ],
     allow_credentials=True,
     allow_methods=["*"],
