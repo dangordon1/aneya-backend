@@ -19,8 +19,8 @@ import tempfile
 # Load environment variables from .env file
 load_dotenv()
 
-# Add servers directory to path (servers is in root directory, one level up from backend)
-sys.path.insert(0, str(Path(__file__).parent.parent / "servers"))
+# Add servers directory to path (servers is in the backend repo root)
+sys.path.insert(0, str(Path(__file__).parent / "servers"))
 from clinical_decision_support_client import ClinicalDecisionSupportClient
 
 # Global instances (reused across requests)
@@ -62,47 +62,9 @@ async def lifespan(app: FastAPI):
     client = ClinicalDecisionSupportClient(anthropic_api_key=anthropic_key)
     print("✅ Client initialized (servers will be loaded based on user region)")
 
-    # Initialize Parakeet TDT model (NVIDIA, 5x faster and more accurate than Whisper!)
-    # This is REQUIRED for voice input functionality
-    try:
-        print("🎤 Loading NVIDIA Parakeet TDT 1.1B model for transcription...")
-        print("   (First load downloads ~600MB model from HuggingFace - may take 1-2 minutes)")
-        import sys
-        sys.stdout.flush()  # Force flush to ensure log appears
-
-        import nemo.collections.asr as nemo_asr
-        parakeet_model = nemo_asr.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-1.1b')
-
-        print("✅ Parakeet TDT model loaded successfully")
-        print("   Performance: 2.7s latency, 5.0% WER (vs Whisper small: 13s, 14% WER)")
-        sys.stdout.flush()
-    except Exception as e:
-        error_msg = f"""
-        ❌ FATAL ERROR: Failed to load Parakeet TDT model!
-
-        Voice input requires the Parakeet model for transcription.
-
-        Error: {type(e).__name__}: {str(e)}
-
-        This may be due to:
-        1. Missing NeMo toolkit: pip install nemo_toolkit[asr]
-        2. Insufficient memory (model requires ~2GB RAM)
-        3. Network issues downloading model files from HuggingFace
-        4. NumPy version incompatibility (requires NumPy < 2.2)
-
-        Voice transcription will not be available.
-        """
-        print(error_msg)
-        import traceback
-        traceback.print_exc()
-        sys.stdout.flush()
-
-        # For now, continue with parakeet_model = None
-        # This allows the rest of the API to work
-        # Users will get a clear 503 error when trying to use voice input
-        parakeet_model = None
-        print("⚠️  WARNING: Continuing without voice transcription support")
-        sys.stdout.flush()
+    # LAZY LOADING: Parakeet TDT model will be loaded on first transcription request
+    # This allows Cloud Run to start quickly and pass health checks
+    print("ℹ️  Parakeet TDT model will be loaded on first transcription request (lazy loading)")
 
     yield
 
@@ -124,6 +86,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",  # Local development
+        "http://localhost:5174",  # Local development (alternative port)
         "http://localhost:3000",
         "https://*.vercel.app",  # Vercel deployments
         "https://aneya.vercel.app",  # Production frontend
@@ -345,6 +308,31 @@ async def get_examples():
     }
 
 
+def load_parakeet_model():
+    """Lazily load the Parakeet TDT model on first use."""
+    global parakeet_model
+    if parakeet_model is not None:
+        return parakeet_model
+
+    print("🎤 Loading NVIDIA Parakeet TDT 0.6B model for transcription...")
+    print("   (First load downloads ~350MB model from HuggingFace)")
+    import sys
+    sys.stdout.flush()
+
+    try:
+        import nemo.collections.asr as nemo_asr
+        parakeet_model = nemo_asr.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v2')
+        print("✅ Parakeet TDT model loaded successfully")
+        sys.stdout.flush()
+        return parakeet_model
+    except Exception as e:
+        print(f"❌ Failed to load Parakeet model: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.stdout.flush()
+        raise HTTPException(status_code=503, detail=f"Failed to load transcription model: {str(e)}")
+
+
 @app.post("/api/transcribe")
 async def transcribe_audio(audio: UploadFile = File(...)):
     """
@@ -356,10 +344,9 @@ async def transcribe_audio(audio: UploadFile = File(...)):
     Returns:
         Transcribed text (with numbers spelled out, e.g., "thirty eight point five")
     """
-    print(f"📝 Transcribe endpoint called - parakeet_model is {'available' if parakeet_model else 'NOT available'}")
-    if parakeet_model is None:
-        print("❌ Parakeet model is None - returning 503")
-        raise HTTPException(status_code=503, detail="Parakeet model not initialized - transcription unavailable")
+    # Lazy load the model on first request
+    model = load_parakeet_model()
+    print(f"📝 Transcribe endpoint called - model loaded: {model is not None}")
 
     try:
         print(f"🎤 Transcribing audio file: {audio.filename}")
@@ -368,39 +355,97 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp_file:
             content = await audio.read()
             tmp_file.write(content)
-            tmp_file_path = tmp_file.name
+            tmp_webm_path = tmp_file.name
+
+        # Save a copy of the recording for debugging
+        import datetime
+        debug_dir = Path(__file__).parent / "debug_recordings"
+        debug_dir.mkdir(exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_webm_path = debug_dir / f"recording_{timestamp}.webm"
+        with open(debug_webm_path, "wb") as f:
+            f.write(content)
+        print(f"💾 Saved debug recording to: {debug_webm_path}")
+
+        # Log audio file details
+        audio_size_kb = len(content) / 1024
+        print(f"📊 Audio file size: {audio_size_kb:.2f} KB ({len(content)} bytes)")
+
+        # Convert WebM to WAV (16kHz mono) for reliable transcription
+        # WebM chunks concatenated together don't form a valid container,
+        # but ffmpeg can still decode the audio stream
+        import subprocess
+        tmp_wav_path = tmp_webm_path.replace('.webm', '.wav')
+        try:
+            result = subprocess.run([
+                'ffmpeg', '-y', '-i', tmp_webm_path,
+                '-ar', '16000',  # 16kHz sample rate (required by Parakeet)
+                '-ac', '1',      # Mono
+                '-f', 'wav',
+                tmp_wav_path
+            ], capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                print(f"⚠️  FFmpeg conversion failed: {result.stderr}")
+                # Fall back to using webm directly
+                tmp_file_path = tmp_webm_path
+            else:
+                tmp_file_path = tmp_wav_path
+                print(f"✅ Converted to WAV: {os.path.getsize(tmp_wav_path) / 1024:.2f} KB")
+                # Save a copy of the WAV for debugging
+                debug_wav_path = debug_dir / f"recording_{timestamp}.wav"
+                import shutil
+                shutil.copy(tmp_wav_path, debug_wav_path)
+                print(f"💾 Saved debug WAV to: {debug_wav_path}")
+        except FileNotFoundError:
+            print("⚠️  FFmpeg not found, using WebM directly")
+            tmp_file_path = tmp_webm_path
+        except subprocess.TimeoutExpired:
+            print("⚠️  FFmpeg timeout, using WebM directly")
+            tmp_file_path = tmp_webm_path
 
         try:
             # Transcribe using NVIDIA Parakeet TDT 1.1B
             import time
             start = time.time()
-            result = parakeet_model.transcribe([tmp_file_path])
+            result = model.transcribe([tmp_file_path])
             latency = time.time() - start
 
             # Extract text from result
             if result and len(result) > 0:
                 transcription = result[0]
-                # Handle both string and Hypothesis object
+                # Handle different return types from different model versions
                 if hasattr(transcription, 'text'):
+                    # Hypothesis object (older models)
                     transcription = transcription.text
+                elif isinstance(transcription, list) and len(transcription) > 0:
+                    # List of strings (v2 models return list)
+                    transcription = transcription[0] if isinstance(transcription[0], str) else str(transcription[0])
+                elif isinstance(transcription, str):
+                    # Already a string
+                    pass
                 else:
                     transcription = str(transcription)
             else:
                 transcription = ""
 
-            print(f"✅ Transcription complete in {latency:.2f}s: {transcription[:100]}...")
+            # Log full transcription for debugging
+            print(f"✅ Transcription complete in {latency:.2f}s")
+            print(f"📝 Full transcription text: '{transcription}'")
 
             return {
                 "success": True,
                 "text": transcription.strip(),
                 "latency_seconds": round(latency, 2),
-                "model": "nvidia/parakeet-tdt-1.1b"
+                "model": "nvidia/parakeet-tdt-0.6b-v2"
             }
 
         finally:
-            # Clean up temporary file
-            if os.path.exists(tmp_file_path):
-                os.unlink(tmp_file_path)
+            # Clean up temporary files
+            if os.path.exists(tmp_webm_path):
+                os.unlink(tmp_webm_path)
+            if os.path.exists(tmp_wav_path):
+                os.unlink(tmp_wav_path)
 
     except Exception as e:
         print(f"❌ Transcription error: {str(e)}")

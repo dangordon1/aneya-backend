@@ -135,7 +135,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --region="${REGION}" \
     --project="${PROJECT_ID}" \
     --allow-unauthenticated \
-    --memory=2Gi \
+    --memory=8Gi \
     --cpu=2 \
     --timeout=300 \
     --max-instances=10 \

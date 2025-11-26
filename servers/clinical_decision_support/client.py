@@ -1058,6 +1058,8 @@ TASK:
 1. Use the available tools to search for relevant clinical guidelines and treatment information
 2. Based on the consultation and evidence found, identify:
    - The diagnosis (with confidence level: high/medium/low)
+   - The source guideline (e.g., "NICE NG138", "BTS/SIGN Asthma Guideline")
+   - The guideline URL (if available from your tool searches)
    - Appropriate treatments
    - Specific drug names mentioned or recommended (use generic names, e.g., "Amoxicillin" not "Amoxil")
 
@@ -1068,6 +1070,8 @@ Return your final answer as JSON ONLY (no other text):
     {{
       "diagnosis": "medical condition name",
       "confidence": "high|medium|low",
+      "source": "guideline name (e.g., NICE NG138)",
+      "url": "full guideline URL if available from tools, otherwise empty string",
       "treatments": [
         {{
           "name": "treatment description",
@@ -1315,10 +1319,32 @@ DIAGNOSES ({len(diagnoses)}):
         if not diagnoses:
             summary += "\nNo diagnoses identified."
 
+        # Build bnf_prescribing_guidance array for frontend compatibility
+        # Extract BNF data from diagnoses and restructure it
+        bnf_prescribing_guidance = []
+        for diag in diagnoses:
+            for tx in diag.get('treatments', []):
+                bnf_info = tx.get('bnf_info', {})
+                for drug_name, drug_data in bnf_info.items():
+                    # Create a medication entry in the format the frontend expects
+                    medication_entry = {
+                        'medication': drug_name,
+                        'url': drug_data.get('url', ''),
+                        'indications': drug_data.get('indications', ''),
+                        'dosage': drug_data.get('dosage', ''),
+                        'contraindications': drug_data.get('contraindications', ''),
+                        'cautions': drug_data.get('cautions', ''),
+                        'side_effects': drug_data.get('side_effects', ''),
+                        'interactions': drug_data.get('interactions', ''),
+                        'is_first_line': True,  # Mark as first-line if it's in the primary treatment
+                        'treatment_context': tx.get('name', '')  # Include treatment context
+                    }
+                    bnf_prescribing_guidance.append(medication_entry)
+
         result = {
             'diagnoses': diagnoses,
             'summary': summary,
-            'bnf_prescribing_guidance': []  # For backwards compatibility with API
+            'bnf_prescribing_guidance': bnf_prescribing_guidance
         }
 
         if verbose:

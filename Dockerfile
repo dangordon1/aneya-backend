@@ -38,8 +38,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Cloud Run has 10-minute startup timeout, which is sufficient
 # Model is cached after first download for instant subsequent startups
 
-# Copy application code (maintain directory structure)
-COPY backend/ ./backend/
+# Copy application code (at root level)
+COPY api.py .
 COPY servers/ ./servers/
 
 # Create a non-root user
@@ -50,6 +50,4 @@ USER aneya
 EXPOSE 8080
 
 # Run the application with uvicorn on port 8080
-# Using exec form (JSON array) to prevent shell variable expansion
-# This ensures Railway cannot inject PORT variable into the command
-CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]

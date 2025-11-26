@@ -1,6 +1,6 @@
-# Heidi - Clinical Decision Support System
+# Aneya MCP Servers - Clinical Decision Support System
 
-Multi-server MCP architecture for evidence-based clinical recommendations.
+Multi-server MCP architecture for evidence-based clinical recommendations with 22+ regional guideline servers.
 
 ## Architecture Overview
 
@@ -9,122 +9,133 @@ Multi-server MCP architecture for evidence-based clinical recommendations.
 │              Clinical Decision Support Client                        │
 │              (Orchestration Layer with Smart Fallback)               │
 │                                                                      │
-│  • Parallel server connections (4 servers)                          │
+│  • Region detection (IP geolocation)                                │
+│  • Parallel server connections (region-specific)                    │
 │  • Intelligent workflow: Guidelines → PubMed fallback               │
 │  • Tool routing & discovery                                         │
 └──────────────────────────────────────────────────────────────────────┘
                                   │
-        ┌────────────────┬────────┴────────┬─────────────────┐
-        │                │                 │                 │
-┌───────▼────────┐ ┌────▼─────┐  ┌────────▼────────┐ ┌─────▼──────┐
-│  Geolocation   │ │  NICE    │  │      BNF        │ │  PubMed    │
-│     Server     │ │Guidelines│  │    Server       │ │  Server    │
-│                │ │ Server   │  │                 │ │            │
-│  • Country     │ │          │  │  • Drug search  │ │ • Search   │
-│    detection   │ │ • Search │  │  • Drug details │ │   35M+     │
-│                │ │ • Details│  │  • Conditions   │ │   articles │
-│  2 tools       │ │ • Cats.  │  │  • Interactions │ │ • Retrieve │
-│                │ │          │  │                 │ │   abstracts│
-│                │ │ 3 tools  │  │  4 tools        │ │            │
-│                │ │          │  │                 │ │ 3 tools    │
-└────────────────┘ └──────────┘  └─────────────────┘ └────────────┘
+    ┌─────────────┬───────────────┼───────────────┬─────────────┐
+    │             │               │               │             │
+┌───▼───┐    ┌───▼───┐      ┌────▼────┐    ┌────▼────┐   ┌────▼────┐
+│  UK   │    │  US   │      │  India  │    │Australia│   │ Cross-  │
+│Servers│    │Servers│      │ Servers │    │ Servers │   │Platform │
+│       │    │       │      │         │    │         │   │         │
+│• NICE │    │• CDC  │      │• ICMR   │    │• NHMRC  │   │• PubMed │
+│• BNF  │    │• AAP  │      │• FOGSI  │    │         │   │• GeoIP  │
+│       │    │• ADA  │      │• IAP    │    │         │   │• Patient│
+│       │    │• AHA  │      │• CSI    │    │         │   │         │
+│       │    │• IDSA │      │• RSSDI  │    │         │   │         │
+│       │    │• USPSTF│     │• NCG    │    │         │   │         │
+│       │    │       │      │• STG    │    │         │   │         │
+└───────┘    └───────┘      └─────────┘    └─────────┘   └─────────┘
 ```
 
 ## Components
 
-### 1. Individual MCP Servers (FastMCP)
+### 1. Regional MCP Servers (FastMCP)
 
-All servers use the FastMCP framework with `@mcp.tool(name="...", description="...")` decorators:
+All servers use the FastMCP framework with `@mcp.tool(name="...", description="...")` decorators.
 
-#### Geolocation Server (`geolocation_server.py`)
-- `get_country_from_ip` - Get country from IP address
-- `get_user_country` - Auto-detect user's country
+#### UK Servers (`guidelines/uk/`)
+| Server | Tools | Description |
+|--------|-------|-------------|
+| `nice_guidelines_server.py` | search, details, categories | NICE clinical guidelines (100+ topics) |
+| `bnf_server.py` | search, info, conditions, interactions | British National Formulary drug info |
 
-#### NICE Guidelines Server (`nice_guidelines_server.py`)
-- `search_nice_guidelines` - Search UK clinical guidelines
-- `get_guideline_details` - Get detailed guideline information
-- `list_guideline_categories` - List guideline categories
+#### US Servers (`guidelines/us/`)
+| Server | Source | Description |
+|--------|--------|-------------|
+| `cdc_guidelines_server.py` | CDC | Disease prevention & control |
+| `aap_guidelines_server.py` | AAP | American Academy of Pediatrics |
+| `ada_standards_server.py` | ADA | American Diabetes Association |
+| `aha_acc_server.py` | AHA/ACC | Heart disease guidelines |
+| `idsa_server.py` | IDSA | Infectious disease guidelines |
+| `uspstf_server.py` | USPSTF | Preventive services screening |
 
-#### BNF Server (`bnf_server.py`)
-- `search_bnf_drug` - Search for medications
-- `get_bnf_drug_info` - Get detailed drug information
-- `search_bnf_by_condition` - Search drugs by medical condition
-- `get_bnf_drug_interactions` - Get drug interaction information
+#### India Servers (`guidelines/india/`)
+| Server | Source | Description |
+|--------|--------|-------------|
+| `icmr_server.py` | ICMR | Medical research council |
+| `fogsi_server.py` | FOGSI | Obstetrics & gynecology |
+| `iap_guidelines_server.py` | IAP | Pediatrics guidelines |
+| `csi_server.py` | CSI | Cardiology society |
+| `rssdi_server.py` | RSSDI | Diabetes standards |
+| `ncg_server.py` | NCG | Clinical guidelines |
+| `stg_server.py` | STG | Standard treatment |
 
-#### PubMed Server (`pubmed_server.py`) **NEW**
-- `search_pubmed` - Search 35M+ peer-reviewed medical articles
-- `get_article` - Retrieve full article details with abstract
-- `get_multiple_articles` - Batch retrieve multiple articles
+#### Australia Servers (`guidelines/australia/`)
+| Server | Source | Description |
+|--------|--------|-------------|
+| `nhmrc_guidelines_server.py` | NHMRC | National health research council |
+
+#### Cross-Platform Servers
+| Server | Tools | Description |
+|--------|-------|-------------|
+| `geolocation_server.py` | get_country_from_ip, get_user_country | IP-based location detection |
+| `pubmed_server.py` | search, get_article, get_multiple | 35M+ medical articles |
+| `patient_info_server.py` | manage patient data | Demographics, allergies, medications |
 
 ### 2. Clinical Decision Support Client
 
-**File:** `clinical_decision_support_client.py`
+**File:** `clinical_decision_support/client.py`
 
 Multi-server client that orchestrates the clinical decision support workflow:
 
 **Key Features:**
-- **Parallel Server Connections** - Connects to all 3 servers concurrently using `asyncio.gather()`
+- **Region Detection** - Auto-detects user location from IP address
+- **Parallel Server Connections** - Connects to region-specific servers using `asyncio.gather()`
 - **Tool Registry** - Builds mapping of tool_name → server_name
 - **Tool Routing** - Routes tool calls to appropriate server
-- **Workflow Orchestration** - Implements clinical decision support logic
+- **Smart Fallback** - Falls back to PubMed when regional guidelines insufficient
 
-**Workflow Steps (Enhanced with PubMed Fallback):**
-1. Determine location (auto-detect or override)
-2. Search NICE guidelines for condition (UK only)
-   - **If < 2 guidelines found** → Search PubMed for evidence (fallback)
-   - **If non-UK location** → Go directly to PubMed
-3. Identify relevant medications from scenario
-4. Search BNF for medication details (parallel execution)
-5. Generate evidence-based recommendations with both guidelines and literature
-
-### 3. Demo Script
-
-**File:** `demo_clinical_decision_support.py`
-
-Interactive CLI demo with:
-- 4 pre-configured clinical cases
-- Custom case input
-- Automated testing mode (`--auto` flag)
+**Workflow Steps:**
+1. Detect location (IP geolocation or manual override)
+2. Connect to region-specific MCP servers
+3. Search regional guidelines for condition
+   - **If < 2 results** → Fallback to PubMed search
+   - **If non-supported region** → Go directly to PubMed
+4. Identify relevant medications from scenario
+5. Search drug database for details (parallel execution)
+6. Generate Claude-based evidence-based recommendations
 
 ## Quick Start
 
 ### Run Individual Servers
 
 ```bash
-# Geolocation server
+# UK servers
+python guidelines/uk/nice_guidelines_server.py
+python guidelines/uk/bnf_server.py
+
+# US servers
+python guidelines/us/cdc_guidelines_server.py
+
+# Cross-platform
 python geolocation_server.py
-
-# NICE Guidelines server
-python nice_guidelines_server.py
-
-# BNF server
-python bnf_server.py
+python pubmed_server.py
 ```
 
 ### Test with MCP Inspector
 
 ```bash
-fastmcp dev geolocation_server.py
-fastmcp dev nice_guidelines_server.py
-fastmcp dev bnf_server.py
+fastmcp dev guidelines/uk/nice_guidelines_server.py
+fastmcp dev guidelines/uk/bnf_server.py
+fastmcp dev pubmed_server.py
 ```
 
-### Run Clinical Decision Support Client
+### Run via API
+
+The servers are typically accessed through the main FastAPI application:
 
 ```bash
-# Run example cases
-python clinical_decision_support_client.py
-
-# Interactive demo
-python demo_clinical_decision_support.py
-
-# Automated demo (all cases)
-python demo_clinical_decision_support.py --auto
+# From project root
+python api.py
 ```
 
 ## Example Clinical Cases
 
-### Case 1: Pediatric Croup (Simple)
+### Case 1: Pediatric Croup (UK)
 ```python
 await client.clinical_decision_support(
     clinical_scenario="3-year-old with croup, moderate stridor at rest, barking cough",
@@ -139,7 +150,7 @@ await client.clinical_decision_support(
 - Medications: dexamethasone, prednisolone
 - Evidence-based recommendations
 
-### Case 2: Post-Operative Sepsis (Complex with Allergy)
+### Case 2: Post-Operative Sepsis (UK, with Allergy)
 ```python
 await client.clinical_decision_support(
     clinical_scenario="Post-operative sepsis, fever 38.5C, tachycardia, suspected wound infection",
@@ -186,49 +197,23 @@ results = await asyncio.gather(*search_tasks, return_exceptions=True)
 
 ## Tool Count Summary
 
-| Server | Tools | Description |
-|--------|-------|-------------|
-| Geolocation | 2 | IP-based location detection |
-| NICE Guidelines | 3 | UK clinical guidelines |
-| BNF | 4 | British National Formulary |
-| PubMed | 3 | Medical literature (35M+ articles) |
-| **Total** | **12** | All tools available to client |
-
-## Configuration for Claude Desktop
-
-Add all three servers to your MCP configuration:
-
-```json
-{
-  "mcpServers": {
-    "geolocation": {
-      "command": "python",
-      "args": ["/path/to/heidi/servers/geolocation_server.py"],
-      "cwd": "/path/to/heidi/servers"
-    },
-    "nice-guidelines": {
-      "command": "python",
-      "args": ["/path/to/heidi/servers/nice_guidelines_server.py"],
-      "cwd": "/path/to/heidi/servers"
-    },
-    "bnf": {
-      "command": "python",
-      "args": ["/path/to/heidi/servers/bnf_server.py"],
-      "cwd": "/path/to/heidi/servers"
-    }
-  }
-}
-```
-
-Or use the client-based orchestration directly in your application.
+| Region | Servers | Est. Tools |
+|--------|---------|------------|
+| UK | NICE, BNF | ~7 |
+| US | CDC, AAP, ADA, AHA, IDSA, USPSTF | ~12 |
+| India | ICMR, FOGSI, IAP, CSI, RSSDI, NCG, STG | ~14 |
+| Australia | NHMRC | ~2 |
+| Cross-Platform | Geolocation, PubMed, Patient | ~7 |
+| **Total** | **22+ servers** | **50+ tools** |
 
 ## Benefits of Multi-Server Architecture
 
 1. **Modularity** - Each server is independently testable and deployable
-2. **Scalability** - Easy to add new specialized servers
+2. **Scalability** - Easy to add new regional servers
 3. **Performance** - Parallel execution where possible
-4. **Separation of Concerns** - Data access (servers) vs orchestration (client)
-5. **Flexibility** - Servers can be used independently or together
+4. **Regional Specificity** - Region-appropriate guidelines and drug info
+5. **Separation of Concerns** - Data access (servers) vs orchestration (client)
+6. **Flexibility** - Servers can be used independently or together
 
 ## Dependencies
 
@@ -240,7 +225,7 @@ httpx >= 0.27.0
 beautifulsoup4 >= 4.14.2
 lxml >= 6.0.2
 requests >= 2.32.5
-anthropic (optional, for Claude integration)
+anthropic >= 0.43.1
 ```
 
 Install with:
@@ -248,43 +233,49 @@ Install with:
 uv sync
 ```
 
-## Files
+## Directory Structure
 
-- `geolocation_server.py` - Geolocation MCP server
-- `nice_guidelines_server.py` - NICE Guidelines MCP server (refactored to FastMCP)
-- `bnf_server.py` - BNF MCP server
-- `clinical_decision_support_client.py` - Multi-server orchestration client
-- `demo_clinical_decision_support.py` - Interactive demo script
-- `test_nice_guidelines.py` - Test script for NICE server
-- `heidi_server.py` - Legacy single-server implementation (deprecated)
+```
+servers/
+├── clinical_decision_support/     # Main orchestration package
+│   ├── client.py                  # ClinicalDecisionSupportClient
+│   ├── config.py                  # Regional configurations
+│   └── utils.py                   # Utility functions
+├── guidelines/                    # Regional guideline servers
+│   ├── uk/                        # NICE, BNF
+│   ├── us/                        # CDC, AAP, ADA, AHA, IDSA, USPSTF
+│   ├── india/                     # ICMR, FOGSI, IAP, CSI, RSSDI, NCG, STG
+│   └── australia/                 # NHMRC
+├── geolocation_server.py          # IP-based country detection
+├── pubmed_server.py               # Medical literature (35M+ articles)
+├── patient_info_server.py         # Patient data management
+└── tests/                         # Comprehensive test suite
+```
 
-## Documentation
+## Testing
 
-- `NICE_GUIDELINES_README.md` - Detailed NICE Guidelines server documentation
-- `HEIDI_README.md` - Legacy orchestrator documentation
-- `CLAUDE.md` - Claude Code instructions
+```bash
+# Run all tests
+pytest tests/
 
-## Future Enhancements
+# Run specific region tests
+pytest tests/test_uk_mcp_client.py
+pytest tests/test_india_mcp_client.py
 
-- [ ] Add caching for frequently accessed guidelines
-- [ ] Support for international guidelines (not just UK)
-- [ ] Drug interaction checking across multiple medications
-- [ ] Integration with local hospital formularies
-- [ ] Real-time alert systems for guideline updates
-- [ ] More sophisticated NLP for scenario parsing
-- [ ] Claude-based agentic workflow for complex cases
+# Run with coverage
+pytest --cov=. --cov-report=html
+```
 
-## Safety and Disclaimers
+## Safety Disclaimer
 
-⚠️ **Important:** This tool provides reference information from clinical guidelines and drug formularies. It is designed to assist healthcare professionals, not replace clinical judgment. Always:
+This tool provides reference information from clinical guidelines and drug formularies. It is designed to **assist** healthcare professionals, not replace clinical judgment. Always:
 
 - Verify dosing before prescribing
 - Consider patient-specific factors
 - Follow local protocols and formularies
 - Use professional clinical judgment
-- Ensure appropriate patient consent
 
 ## Credits
 
-Developed for the Heidi healthcare assistant project.
-Built using FastMCP, NICE guidelines, and BNF resources.
+Developed for the Aneya Clinical Decision Support project.
+Built using FastMCP, regional clinical guidelines, and drug formulary resources.
