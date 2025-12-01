@@ -159,8 +159,11 @@ class RegionalSearchService:
                     return result['guidelines']
                 elif 'topics' in result:
                     return result['topics']
+                elif 'results' in result:
+                    # FOGSI-style response format (and others using 'results' key)
+                    return result['results']
                 elif 'success' in result and result['success']:
-                    # Generic success response
+                    # Generic success response with no data
                     return []
 
             return []
