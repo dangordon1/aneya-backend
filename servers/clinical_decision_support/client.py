@@ -994,6 +994,117 @@ Medical condition:"""
 
         return '\n'.join(summary_parts)
 
+    async def _validate_clinical_input(
+        self,
+        clinical_scenario: str,
+        verbose: bool = True
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Validate that the input is actually a clinical consultation.
+
+        Uses Claude to check if the text represents a genuine clinical scenario
+        (symptoms, patient presentation, clinical consultation) or if it's off-topic.
+
+        Args:
+            clinical_scenario: The text to validate
+            verbose: Whether to print validation result
+
+        Returns:
+            Tuple of (is_valid, error_message)
+            - is_valid: True if this is a clinical consultation, False otherwise
+            - error_message: None if valid, error description if invalid
+        """
+        if not self.anthropic:
+            # Skip validation if no Anthropic client
+            return (True, None)
+
+        try:
+            # Use Claude to validate the input
+            validation_prompt = f"""You are a medical consultation validator. Your job is to determine if the following text represents a genuine clinical consultation or medical scenario.
+
+TEXT TO VALIDATE:
+{clinical_scenario}
+
+VALID clinical consultations include:
+- Patient symptoms and complaints (e.g., "Patient with fever and cough")
+- Clinical presentations (e.g., "3-year-old with barking cough and stridor")
+- Medical history and examination findings
+- Requests for clinical decision support or treatment guidance
+- Diagnostic scenarios
+
+INVALID inputs include:
+- Random statements unrelated to medicine (e.g., "I am feeling autistic", "What's the weather")
+- General questions not about a specific patient case
+- Non-medical topics
+- Personal statements that aren't medical consultations
+- Test inputs or nonsense text
+
+Respond with ONLY a JSON object:
+{{
+  "is_valid": true/false,
+  "reason": "brief explanation of why this is or isn't a clinical consultation"
+}}
+
+Do not include any other text besides the JSON object."""
+
+            message = self.anthropic.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=200,
+                messages=[{
+                    "role": "user",
+                    "content": validation_prompt
+                }]
+            )
+
+            response_text = message.content[0].text.strip()
+
+            # Extract JSON from response
+            if "```json" in response_text:
+                json_start = response_text.find("```json") + 7
+                json_end = response_text.find("```", json_start)
+                response_text = response_text[json_start:json_end].strip()
+            elif "```" in response_text:
+                json_start = response_text.find("```") + 3
+                json_end = response_text.find("```", json_start)
+                response_text = response_text[json_start:json_end].strip()
+
+            # Find JSON object
+            if "{" in response_text and "}" in response_text:
+                json_start = response_text.find("{")
+                json_end = response_text.rfind("}") + 1
+                response_text = response_text[json_start:json_end]
+
+            validation_result = json.loads(response_text)
+
+            is_valid = validation_result.get('is_valid', False)
+            reason = validation_result.get('reason', 'No reason provided')
+
+            if verbose:
+                if is_valid:
+                    print(f"✅ Input validation: VALID - {reason}")
+                else:
+                    print(f"❌ Input validation: INVALID - {reason}")
+
+            if not is_valid:
+                error_message = (
+                    "This system is designed to analyze clinical consultations and provide "
+                    "evidence-based medical guidance. Your input does not appear to be a "
+                    "clinical consultation or medical scenario.\n\n"
+                    f"Reason: {reason}\n\n"
+                    "Please provide information about a patient's symptoms, medical condition, "
+                    "or clinical scenario requiring decision support."
+                )
+                return (False, error_message)
+
+            return (True, None)
+
+        except Exception as e:
+            # If validation fails for any reason, allow processing to continue
+            # (fail open rather than closed)
+            if verbose:
+                print(f"⚠️  Input validation error: {str(e)} - allowing processing to continue")
+            return (True, None)
+
     async def clinical_decision_support(
         self,
         clinical_scenario: str,
@@ -1029,6 +1140,20 @@ Medical condition:"""
         Returns:
             Dictionary with diagnoses (including treatments, drug names, BNF info) and summary
         """
+        # Step 0: Validate input is a clinical consultation
+        is_valid, error_message = await self._validate_clinical_input(clinical_scenario, verbose=verbose)
+
+        if not is_valid:
+            # Return error response indicating invalid input
+            return {
+                'error': 'invalid_input',
+                'error_message': error_message,
+                'diagnoses': [],
+                'bnf_prescribing_guidance': [],
+                'guidelines_searched': [],
+                'summary': error_message
+            }
+
         if verbose:
             print("\n" + "="*70)
             print("🏥 STREAMLINED CLINICAL DECISION SUPPORT")
@@ -1731,7 +1856,7 @@ Return your analysis in the following JSON format:
     {{
       "diagnosis": "Diagnosis name (e.g., Community-Acquired Pneumonia)",
       "source": "NICE guideline reference or CKS",
-      "guideline_url": "URL from above",
+      "guideline_url": "URL from above - MUST match the specific guideline that supports THIS diagnosis",
       "summary": "Brief clinical summary based on scenario and patient info",
       "confidence": "high|medium|low",
       "treatments": [
@@ -1748,6 +1873,7 @@ Return your analysis in the following JSON format:
 
 Instructions:
 - ALWAYS return valid JSON, never plain text
+- CRITICAL: For each diagnosis, use the guideline_url from the SPECIFIC guideline that supports that diagnosis. Do not mix up URLs between different diagnoses.
 - If guidelines lack specific details, infer reasonable diagnoses from the clinical scenario
 - For the scenario "{clinical_scenario}", identify the most likely diagnosis even if full guideline content is not available
 - Include treatment approaches that are standard for the identified condition

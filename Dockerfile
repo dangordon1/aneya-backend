@@ -1,5 +1,6 @@
-# Multi-stage build for aneya backend on Google Cloud Run
-FROM --platform=linux/amd64 python:3.12-slim as base
+# Lightweight Dockerfile for aneya backend on Google Cloud Run
+# Uses Deepgram for transcription (no local models required)
+FROM --platform=linux/amd64 python:3.12-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -21,24 +22,10 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install PyTorch CPU-only FIRST to avoid pulling in CUDA dependencies (~2GB)
-# This ensures nemo-toolkit uses CPU-only PyTorch instead of GPU version
-# Use exact CPU wheel versions from PyTorch's CPU index
-RUN pip install --no-cache-dir \
-    torch \
-    torchvision \
-    torchaudio \
-    --index-url https://download.pytorch.org/whl/cpu
-
-# Install remaining Python dependencies
-# nemo-toolkit will now use the CPU-only PyTorch installed above
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Note: Parakeet model will be downloaded on first startup (~3-5 min)
-# Cloud Run has 10-minute startup timeout, which is sufficient
-# Model is cached after first download for instant subsequent startups
-
-# Copy application code (at root level)
+# Copy application code
 COPY api.py .
 COPY servers/ ./servers/
 

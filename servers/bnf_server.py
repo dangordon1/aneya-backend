@@ -8,7 +8,6 @@ Uses web scraping to access the BNF website (https://bnf.nice.org.uk/).
 """
 
 import requests
-import cloudscraper
 from bs4 import BeautifulSoup
 from typing import Optional, List, Dict, Any
 from fastmcp import FastMCP
@@ -16,6 +15,10 @@ import time
 import os
 import sys
 from urllib.parse import urljoin, quote
+import urllib3
+
+# Suppress SSL verification warnings (required for Bright Data proxy)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Try to import cache, but gracefully handle if Firebase isn't available
 try:
@@ -55,21 +58,30 @@ HEADERS = {
     'Upgrade-Insecure-Requests': '1'
 }
 
-# Use cloudscraper to bypass Cloudflare protection
-# cloudscraper automatically handles Cloudflare challenges without needing external API/proxy
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'mobile': False
-    }
-)
-print("🔄 BNF server using cloudscraper for Cloudflare bypass", file=sys.stderr)
-print("   No external API required - handles Cloudflare challenges locally", file=sys.stderr)
+# Bright Data residential proxy configuration
+# This routes requests through residential IPs to bypass Cloudflare blocking
+BRIGHT_DATA_PROXY = {
+    'username': 'brd-customer-hl_3dba8aa2-zone-residential_proxy1',
+    'password': 'i4c5leuevuqr',
+    'host': 'brd.superproxy.io',
+    'port': '33335'
+}
 
-# Legacy session for non-BNF requests if needed
+# Build proxy URL
+proxy_url = f"http://{BRIGHT_DATA_PROXY['username']}:{BRIGHT_DATA_PROXY['password']}@{BRIGHT_DATA_PROXY['host']}:{BRIGHT_DATA_PROXY['port']}"
+proxies = {
+    'http': proxy_url,
+    'https': proxy_url
+}
+
+# Create session with Bright Data proxy
 session = requests.Session()
 session.headers.update(HEADERS)
+session.proxies.update(proxies)
+
+print("🔄 BNF server using Bright Data residential proxy", file=sys.stderr)
+print(f"   Proxy host: {BRIGHT_DATA_PROXY['host']}:{BRIGHT_DATA_PROXY['port']}", file=sys.stderr)
+print("   Requests will route through residential IPs to bypass Cloudflare", file=sys.stderr)
 
 # Initialize cache
 cache = get_cache()
@@ -78,7 +90,7 @@ cache = get_cache()
 def make_request(url: str, timeout: int = 60) -> tuple[Optional[requests.Response], Dict[str, Any]]:
     """
     Make a GET request with proper error handling and rate limiting.
-    Uses cloudscraper to automatically bypass Cloudflare protection.
+    Uses Bright Data residential proxy to bypass Cloudflare protection.
 
     Args:
         url: The URL to request
@@ -89,7 +101,7 @@ def make_request(url: str, timeout: int = 60) -> tuple[Optional[requests.Respons
     """
     debug_info = {
         "url": url,
-        "cloudscraper_enabled": True,
+        "bright_data_proxy": True,
         "timeout": timeout
     }
 
@@ -97,9 +109,10 @@ def make_request(url: str, timeout: int = 60) -> tuple[Optional[requests.Respons
         # Add a small delay to be respectful to the server
         time.sleep(0.5)
 
-        # Use cloudscraper which handles Cloudflare challenges automatically
-        print(f"🌐 [CLOUDSCRAPER] Requesting: {url}", file=sys.stderr)
-        response = scraper.get(url, timeout=timeout)
+        # Use session with Bright Data residential proxy
+        # verify=False needed for Bright Data proxy SSL interception
+        print(f"🌐 [BRIGHT DATA PROXY] Requesting: {url}", file=sys.stderr)
+        response = session.get(url, timeout=timeout, verify=False)
 
         # Log response details
         print(f"✅ Response received: {response.status_code} (size: {len(response.content)} bytes)", file=sys.stderr)

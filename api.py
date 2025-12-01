@@ -16,6 +16,7 @@ import sys
 import json
 import httpx
 import tempfile
+import time
 # Load environment variables from .env file
 load_dotenv()
 
@@ -25,13 +26,13 @@ from clinical_decision_support_client import ClinicalDecisionSupportClient
 
 # Global instances (reused across requests)
 client: Optional[ClinicalDecisionSupportClient] = None
-parakeet_model = None  # NVIDIA Parakeet TDT for transcription
+deepgram_client = None  # Deepgram API client for transcription
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
-    global client, parakeet_model
+    global client, deepgram_client
 
     # Startup
     print("🚀 Starting Aneya API...")
@@ -57,14 +58,19 @@ async def lifespan(app: FastAPI):
 
     print(f"✅ Anthropic API key loaded (ends with ...{anthropic_key[-4:]})")
 
+    # Initialize Deepgram client for transcription
+    deepgram_key = os.getenv("DEEPGRAM_API_KEY")
+    if deepgram_key:
+        from deepgram import DeepgramClient
+        deepgram_client = DeepgramClient(api_key=deepgram_key)
+        print(f"✅ Deepgram API key loaded (ends with ...{deepgram_key[-4:]})")
+    else:
+        print("⚠️  DEEPGRAM_API_KEY not found - transcription will not work")
+
     # Initialize client but DON'T connect to servers yet
     # Servers will be connected per-request based on user's region (detected from IP)
     client = ClinicalDecisionSupportClient(anthropic_api_key=anthropic_key)
     print("✅ Client initialized (servers will be loaded based on user region)")
-
-    # LAZY LOADING: Parakeet TDT model will be loaded on first transcription request
-    # This allows Cloud Run to start quickly and pass health checks
-    print("ℹ️  Parakeet TDT model will be loaded on first transcription request (lazy loading)")
 
     yield
 
@@ -306,129 +312,72 @@ async def get_examples():
     }
 
 
-def load_parakeet_model():
-    """Lazily load the Parakeet TDT model on first use."""
-    global parakeet_model
-    if parakeet_model is not None:
-        return parakeet_model
-
-    print("🎤 Loading NVIDIA Parakeet TDT 0.6B model for transcription...")
-    print("   (First load downloads ~350MB model from HuggingFace)")
-    import sys
-    sys.stdout.flush()
-
-    try:
-        import nemo.collections.asr as nemo_asr
-        parakeet_model = nemo_asr.models.ASRModel.from_pretrained('nvidia/parakeet-tdt-0.6b-v2')
-        print("✅ Parakeet TDT model loaded successfully")
-        sys.stdout.flush()
-        return parakeet_model
-    except Exception as e:
-        print(f"❌ Failed to load Parakeet model: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.stdout.flush()
-        raise HTTPException(status_code=503, detail=f"Failed to load transcription model: {str(e)}")
-
-
 @app.post("/api/transcribe")
 async def transcribe_audio(audio: UploadFile = File(...)):
     """
-    Transcribe audio using NVIDIA Parakeet TDT 1.1B model
+    Transcribe audio using Deepgram API
 
     Args:
         audio: Audio file (webm, wav, mp3, etc.)
 
     Returns:
-        Transcribed text (with numbers spelled out, e.g., "thirty eight point five")
+        Transcribed text with fast cloud-based transcription (~300ms latency)
     """
-    # Lazy load the model on first request
-    model = load_parakeet_model()
-    print(f"📝 Transcribe endpoint called - model loaded: {model is not None}")
+    if deepgram_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Transcription service not configured. DEEPGRAM_API_KEY is required."
+        )
 
     try:
         print(f"🎤 Transcribing audio file: {audio.filename}")
 
-        # Save uploaded file to temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp_file:
-            content = await audio.read()
-            tmp_file.write(content)
-            tmp_webm_path = tmp_file.name
-
-        # Log audio file details
+        # Read the audio content
+        content = await audio.read()
         audio_size_kb = len(content) / 1024
         print(f"📊 Audio file size: {audio_size_kb:.2f} KB ({len(content)} bytes)")
 
-        # Convert WebM to WAV (16kHz mono) for reliable transcription
-        # WebM chunks concatenated together don't form a valid container,
-        # but ffmpeg can still decode the audio stream
-        import subprocess
-        tmp_wav_path = tmp_webm_path.replace('.webm', '.wav')
-        try:
-            result = subprocess.run([
-                'ffmpeg', '-y', '-i', tmp_webm_path,
-                '-ar', '16000',  # 16kHz sample rate (required by Parakeet)
-                '-ac', '1',      # Mono
-                '-f', 'wav',
-                tmp_wav_path
-            ], capture_output=True, text=True, timeout=30)
+        # Determine the mimetype
+        filename = audio.filename or "audio.webm"
+        if filename.endswith(".webm"):
+            mimetype = "audio/webm"
+        elif filename.endswith(".wav"):
+            mimetype = "audio/wav"
+        elif filename.endswith(".mp3"):
+            mimetype = "audio/mp3"
+        else:
+            mimetype = "audio/webm"  # Default for browser recordings
 
-            if result.returncode != 0:
-                print(f"⚠️  FFmpeg conversion failed: {result.stderr}")
-                # Fall back to using webm directly
-                tmp_file_path = tmp_webm_path
-            else:
-                tmp_file_path = tmp_wav_path
-                print(f"✅ Converted to WAV: {os.path.getsize(tmp_wav_path) / 1024:.2f} KB")
-        except FileNotFoundError:
-            print("⚠️  FFmpeg not found, using WebM directly")
-            tmp_file_path = tmp_webm_path
-        except subprocess.TimeoutExpired:
-            print("⚠️  FFmpeg timeout, using WebM directly")
-            tmp_file_path = tmp_webm_path
+        # Transcribe using Deepgram
+        start = time.time()
 
-        try:
-            # Transcribe using NVIDIA Parakeet TDT 1.1B
-            import time
-            start = time.time()
-            result = model.transcribe([tmp_file_path])
-            latency = time.time() - start
+        # Use the SDK v5 listen API - deepgram_client.listen.v1.media.transcribe_file()
+        response = deepgram_client.listen.v1.media.transcribe_file(
+            request=content,
+            model="nova-2",
+            language="en",
+            smart_format=True,
+            punctuate=True,
+        )
+        latency = time.time() - start
 
-            # Extract text from result
-            if result and len(result) > 0:
-                transcription = result[0]
-                # Handle different return types from different model versions
-                if hasattr(transcription, 'text'):
-                    # Hypothesis object (older models)
-                    transcription = transcription.text
-                elif isinstance(transcription, list) and len(transcription) > 0:
-                    # List of strings (v2 models return list)
-                    transcription = transcription[0] if isinstance(transcription[0], str) else str(transcription[0])
-                elif isinstance(transcription, str):
-                    # Already a string
-                    pass
-                else:
-                    transcription = str(transcription)
-            else:
-                transcription = ""
+        # Extract transcription from response (SDK v5 format)
+        # Structure: response.results.channels[0].alternatives[0].transcript
+        transcription = ""
+        if response and response.results and response.results.channels:
+            channel = response.results.channels[0]
+            if channel.alternatives:
+                transcription = channel.alternatives[0].transcript or ""
 
-            # Log full transcription for debugging
-            print(f"✅ Transcription complete in {latency:.2f}s")
-            print(f"📝 Full transcription text: '{transcription}'")
+        print(f"✅ Transcription complete in {latency:.2f}s")
+        print(f"📝 Full transcription text: '{transcription}'")
 
-            return {
-                "success": True,
-                "text": transcription.strip(),
-                "latency_seconds": round(latency, 2),
-                "model": "nvidia/parakeet-tdt-0.6b-v2"
-            }
-
-        finally:
-            # Clean up temporary files
-            if os.path.exists(tmp_webm_path):
-                os.unlink(tmp_webm_path)
-            if os.path.exists(tmp_wav_path):
-                os.unlink(tmp_wav_path)
+        return {
+            "success": True,
+            "text": transcription.strip(),
+            "latency_seconds": round(latency, 2),
+            "model": "deepgram/nova-2"
+        }
 
     except Exception as e:
         print(f"❌ Transcription error: {str(e)}")

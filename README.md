@@ -10,7 +10,7 @@ Key features:
 - **Multi-Region Support** - UK, US, India, Australia + International fallback
 - **22+ Guideline Servers** - Comprehensive healthcare coverage from authoritative sources
 - **Intelligent Fallback** - Regional guidelines → PubMed when needed
-- **Real-time Voice Input** - NVIDIA Parakeet TDT (5x faster than Whisper)
+- **Real-time Voice Input** - Deepgram WebSocket streaming transcription
 - **Drug Safety** - BNF information with interaction and allergy warnings
 
 ## Architecture
@@ -86,7 +86,7 @@ The API will be available at: http://localhost:8000
 | `/api/health` | GET | Frontend compatibility health check |
 | `/api/analyze` | POST | Analyze clinical consultation |
 | `/api/examples` | GET | Example clinical scenarios |
-| `/api/transcribe` | POST | Transcribe audio (NVIDIA Parakeet) |
+| `/api/transcribe` | POST | Transcribe audio (Deepgram) |
 
 ## Deployment
 
@@ -138,7 +138,6 @@ aneya-backend/
 │   ├── pubmed_server.py      # Medical literature (35M+ articles)
 │   ├── geolocation_server.py # IP-based country detection
 │   └── tests/                # Comprehensive test suite
-└── transcription/            # Voice transcription module
 ```
 
 ## Testing
