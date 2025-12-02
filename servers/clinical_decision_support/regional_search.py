@@ -61,11 +61,12 @@ class RegionalSearchService:
             print(f"🌍 Regional Search: {config.region_name} ({country_code})")
             print(f"{'='*80}")
 
-        # Initialize result containers
+        # Initialize result containers with support for dynamic treatment keys
         results = {
             'guidelines': [],
             'cks_topics': [],
             'bnf_summaries': [],
+            'drugbank_drugs': [],  # Support for DrugBank (India/International)
             'pubmed_articles': []
         }
 
@@ -131,10 +132,13 @@ class RegionalSearchService:
             if pubmed_result:
                 results['pubmed_articles'].extend(pubmed_result)
 
+        # Return treatment data (BNF for UK, DrugBank for India/International)
+        treatment_data = results.get('bnf_summaries', []) or results.get('drugbank_drugs', [])
+
         return (
             results['guidelines'],
             results['cks_topics'],
-            results['bnf_summaries'],
+            treatment_data,
             results['pubmed_articles']
         )
 
@@ -159,6 +163,9 @@ class RegionalSearchService:
                     return result['guidelines']
                 elif 'topics' in result:
                     return result['topics']
+                elif 'treatments' in result:
+                    # DrugBank-style response format
+                    return result['treatments']
                 elif 'results' in result:
                     # FOGSI-style response format (and others using 'results' key)
                     return result['results']

@@ -6,8 +6,9 @@ Wraps the Clinical Decision Support Client for the React frontend
 
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ import json
 import httpx
 import tempfile
 import time
+import asyncio
 # Load environment variables from .env file
 load_dotenv()
 
@@ -277,6 +279,166 @@ async def analyze_consultation(request: AnalysisRequest):
     except Exception as e:
         print(f"❌ Analysis error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+
+@app.post("/api/analyze-stream")
+async def analyze_consultation_stream(request: AnalysisRequest):
+    """
+    Analyze a clinical consultation with real-time progress updates via Server-Sent Events (SSE)
+
+    This endpoint streams progress updates as the analysis proceeds:
+    - Location detection
+    - Guidelines being searched
+    - Diagnoses identified
+    - BNF drug lookups
+    - Final results
+
+    Args:
+        request: AnalysisRequest with consultation text and optional patient info
+
+    Returns:
+        StreamingResponse with SSE events containing progress updates and final results
+    """
+    if client is None:
+        raise HTTPException(status_code=503, detail="Client not initialized")
+
+    if not request.consultation.strip():
+        raise HTTPException(status_code=400, detail="Consultation text is required")
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        """Generate SSE events for progress updates"""
+        try:
+            # Helper to send SSE event
+            def send_event(event_type: str, data: dict):
+                return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+            # Normalize input
+            patient_id = request.patient_id if request.patient_id and request.patient_id.strip() else None
+            patient_age = request.patient_age if request.patient_age and request.patient_age.strip() else None
+            allergies = request.allergies if request.allergies and request.allergies.strip() else None
+
+            # Send start event
+            yield send_event("start", {"message": "Starting analysis..."})
+
+            # Step 1: Geolocation
+            yield send_event("progress", {"step": "geolocation", "message": "Detecting location..."})
+
+            location_to_use = request.location_override
+            detected_country = None
+
+            if not location_to_use and request.user_ip:
+                geo_data = await client.get_location_from_ip(request.user_ip)
+                if geo_data and geo_data.get('country_code') != 'XX':
+                    location_to_use = geo_data.get('country_code')
+                    detected_country = geo_data.get('country')
+                    yield send_event("location", {
+                        "country": detected_country,
+                        "country_code": location_to_use,
+                        "ip": request.user_ip
+                    })
+                else:
+                    yield send_event("progress", {"step": "geolocation", "message": "Using default region"})
+
+            # Step 2: Connect to servers (will auto-reconnect if region changed)
+            yield send_event("progress", {
+                "step": "connecting",
+                "message": f"Loading medical guidelines for {detected_country or 'default region'}..."
+            })
+            await client.connect_to_servers(country_code=location_to_use, verbose=True)
+
+            # Step 3: Validate input
+            yield send_event("progress", {"step": "validating", "message": "Validating clinical input..."})
+
+            # Step 4: Run analysis
+            yield send_event("progress", {"step": "analyzing", "message": "Analyzing consultation with AI..."})
+
+            # Create a queue to collect events from the progress callback
+            event_queue = asyncio.Queue()
+
+            # Progress callback to emit events in real-time
+            async def progress_callback(event_type: str, data: dict):
+                """Called by clinical_decision_support during analysis"""
+                await event_queue.put((event_type, data))
+
+            # Run the main analysis in background and stream events
+            analysis_task = asyncio.create_task(
+                client.clinical_decision_support(
+                    clinical_scenario=request.consultation,
+                    patient_id=patient_id,
+                    patient_age=patient_age,
+                    allergies=allergies,
+                    location_override=location_to_use,
+                    verbose=False,
+                    progress_callback=progress_callback
+                )
+            )
+
+            # Stream events as they come from the analysis
+            result = None
+            while True:
+                try:
+                    # Check if analysis is done
+                    if analysis_task.done():
+                        result = analysis_task.result()
+                        # Drain any remaining events
+                        while not event_queue.empty():
+                            event_type, data = await event_queue.get()
+                            if event_type == "tool_call":
+                                # Emit guideline search event
+                                tool_name = data.get("tool_name", "")
+                                if "search" in tool_name.lower() or "nice" in tool_name.lower() or "bnf" in tool_name.lower():
+                                    yield send_event("guideline_search", {
+                                        "source": tool_name,
+                                        "query": data.get("tool_input", {})
+                                    })
+                            elif event_type == "bnf_drug":
+                                yield send_event("bnf_drug", data)
+                        break
+
+                    # Wait for next event with timeout
+                    try:
+                        event_type, data = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                        if event_type == "tool_call":
+                            # Emit guideline search event
+                            tool_name = data.get("tool_name", "")
+                            if "search" in tool_name.lower() or "nice" in tool_name.lower() or "bnf" in tool_name.lower():
+                                yield send_event("guideline_search", {
+                                    "source": tool_name,
+                                    "query": data.get("tool_input", {})
+                                })
+                        elif event_type == "bnf_drug":
+                            yield send_event("bnf_drug", data)
+                    except asyncio.TimeoutError:
+                        # No events, continue waiting for analysis
+                        continue
+
+                except Exception as e:
+                    print(f"Error processing event: {e}")
+                    break
+
+            # Check for invalid input error
+            if result and result.get('error') == 'invalid_input':
+                yield send_event("error", {
+                    "type": "invalid_input",
+                    "message": result.get('error_message', 'Invalid input')
+                })
+                return
+
+            # Send final complete result (diagnoses and BNF events already sent in real-time)
+            yield send_event("complete", result)
+            yield send_event("done", {"message": "Analysis complete"})
+
+        except Exception as e:
+            yield send_event("error", {"message": str(e)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
 
 
 @app.get("/api/examples")

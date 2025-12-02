@@ -84,7 +84,7 @@ REGION_CONFIGS = {
     "INDIA": RegionConfig(
         region_name="India",
         country_codes=["IN"],
-        required_servers=["patient_info", "fogsi", "pubmed"],
+        required_servers=["patient_info", "fogsi", "drugbank", "pubmed"],
         searches=[
             SearchConfig(
                 resource_type=ResourceType.GUIDELINE,
@@ -93,6 +93,14 @@ REGION_CONFIGS = {
                 result_key="guidelines",
                 deduplicate=False,
                 required=True
+            ),
+            SearchConfig(
+                resource_type=ResourceType.TREATMENT,
+                tool_name="search_drugbank_by_condition",
+                tool_params={"condition": "{clinical_scenario}"},
+                result_key="drugbank_drugs",
+                deduplicate=True,
+                required=False
             )
         ],
         min_results_threshold=1,
@@ -102,8 +110,17 @@ REGION_CONFIGS = {
     "INTERNATIONAL": RegionConfig(
         region_name="International",
         country_codes=["default"],
-        required_servers=["patient_info", "pubmed"],
-        searches=[],  # No regional guidelines, PubMed only
+        required_servers=["patient_info", "drugbank", "pubmed"],
+        searches=[
+            SearchConfig(
+                resource_type=ResourceType.TREATMENT,
+                tool_name="search_drugbank_by_condition",
+                tool_params={"condition": "{clinical_scenario}"},
+                result_key="drugbank_drugs",
+                deduplicate=True,
+                required=False
+            )
+        ],
         min_results_threshold=0,
         pubmed_fallback=True
     )
@@ -122,8 +139,10 @@ SERVERS_DIR = Path(__file__).parent.parent  # Go up from clinical_decision_suppo
 MCP_SERVERS = {
     "patient_info": str(SERVERS_DIR / "patient_info_server.py"),
     "nice": str(SERVERS_DIR / "nice_guidelines_server.py"),
-    "bnf": str(SERVERS_DIR / "bnf_server.py"),
+    "bnf": str(SERVERS_DIR / "bnf_server.py"),  # UK only
     "fogsi": str(SERVERS_DIR / "fogsi_server.py"),  # FOGSI Guidelines (India)
+    "drugbank": str(SERVERS_DIR / "drugbank_server.py"),  # DrugBank (India + International)
+    "mims": str(SERVERS_DIR / "mims_india_server.py"),  # MIMS Drug Info (India) - reserved for future API access
     "pubmed": str(SERVERS_DIR / "pubmed_server.py")
 }
 

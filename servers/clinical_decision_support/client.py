@@ -12,7 +12,7 @@ from contextlib import AsyncExitStack
 from anthropic import Anthropic
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Callable
 import os
 import httpx
 
@@ -39,6 +39,7 @@ class ClinicalDecisionSupportClient:
         self.sessions: Dict[str, ClientSession] = {}  # server_name -> ClientSession
         self.tool_registry: Dict[str, str] = {}  # tool_name -> server_name
         self.exit_stack = AsyncExitStack()
+        self.current_region: Optional[str] = None  # Track currently connected region
 
         api_key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
         self.anthropic = Anthropic(api_key=api_key) if api_key else None
@@ -106,6 +107,21 @@ class ClinicalDecisionSupportClient:
             server_paths: Optional dict of server_name -> server_path. Uses defaults if None.
             verbose: Whether to print connection status
         """
+        # Normalize country code for comparison
+        normalized_code = country_code.upper() if country_code else None
+
+        # Check if we need to reconnect (region changed)
+        if self.sessions and self.current_region != normalized_code:
+            if verbose:
+                print(f"🔄 Region changed from {self.current_region} to {normalized_code}, reconnecting servers...")
+            await self.disconnect_servers()
+
+        # Skip if already connected to the same region
+        if self.sessions and self.current_region == normalized_code:
+            if verbose:
+                print(f"✅ Already connected to region {normalized_code}, reusing existing connections")
+            return
+
         # Filter servers based on country code
         if country_code and not server_paths:
             # Get region-specific server list
@@ -145,6 +161,11 @@ class ClinicalDecisionSupportClient:
 
         # Build tool registry by listing tools from all servers in parallel
         await self._discover_tools(verbose)
+
+        # Update current region after successful connection
+        self.current_region = normalized_code
+        if verbose:
+            print(f"✅ Connected to region: {self.current_region}")
 
     async def _connect_single_server(self, server_name: str, server_path: str, verbose: bool = True):
         """Connect to a single MCP server."""
@@ -727,6 +748,33 @@ Medical condition:"""
             except Exception as e:
                 return ('bnf', None, bnf.get('title', 'BNF summary'), False, str(e))
 
+        async def fetch_drugbank_drug_detail(drug):
+            """Fetch DrugBank drug information"""
+            try:
+                result = await self.call_tool("get_drugbank_drug_info", {
+                    "drug_url": drug['url']
+                })
+                drug_content = json.loads(result.content[0].text)
+
+                if drug_content.get('success'):
+                    return ('bnf', {  # Return as 'bnf' type for compatibility
+                        'title': drug['name'],
+                        'url': drug['url'],
+                        'drugbank_id': drug_content.get('drugbank_id', ''),
+                        'type': drug_content.get('type', ''),
+                        'summary': drug_content.get('indications', ''),
+                        'pharmacodynamics': drug_content.get('pharmacodynamics', ''),
+                        'mechanism': drug_content.get('mechanism_of_action', ''),
+                        'absorption': drug_content.get('absorption', ''),
+                        'metabolism': drug_content.get('metabolism', ''),
+                        'half_life': drug_content.get('half_life', ''),
+                        'toxicity': drug_content.get('toxicity', '')
+                    }, drug['name'], True, None)
+                else:
+                    return ('bnf', None, drug['name'], False, 'Failed')
+            except Exception as e:
+                return ('bnf', None, drug.get('name', 'Drug'), False, str(e))
+
         # Build all detail fetch tasks
         detail_tasks = []
 
@@ -747,10 +795,18 @@ Medical condition:"""
                 detail_tasks.append(fetch_cks_detail(topic))
 
         if bnf_summaries:
+            # Detect if we have DrugBank or BNF data based on structure
+            is_drugbank = bnf_summaries and 'name' in bnf_summaries[0] and 'drugbank_id' in bnf_summaries[0]
+            resource_name = "drug(s)" if is_drugbank else "BNF treatment summar{'y' if len(bnf_summaries[:3]) == 1 else 'ies'}"
+
             if verbose:
-                print(f"   Retrieving full BNF treatment summar{'y' if len(bnf_summaries[:3]) == 1 else 'ies'} for {len(bnf_summaries[:3])} resource(s) (parallel)...")
-            for bnf in bnf_summaries[:3]:
-                detail_tasks.append(fetch_bnf_summary_detail(bnf))
+                print(f"   Retrieving full {resource_name} for {len(bnf_summaries[:3])} resource(s) (parallel)...")
+
+            for item in bnf_summaries[:3]:
+                if is_drugbank:
+                    detail_tasks.append(fetch_drugbank_drug_detail(item))
+                else:
+                    detail_tasks.append(fetch_bnf_summary_detail(item))
 
         # Execute all detail fetches in parallel
         if detail_tasks:
@@ -1112,7 +1168,8 @@ Do not include any other text besides the JSON object."""
         patient_age: Optional[str] = None,
         allergies: Optional[str] = None,
         location_override: Optional[str] = None,
-        verbose: bool = True
+        verbose: bool = True,
+        progress_callback: Optional[Callable] = None
     ) -> Dict[str, Any]:
         """
         Streamlined clinical decision support workflow.
@@ -1236,6 +1293,13 @@ Return your final answer as JSON ONLY (no other text):
                         if verbose:
                             print(f"   🔧 Calling tool: {tool_name}({tool_input})")
 
+                        # Emit progress callback for tool call
+                        if progress_callback:
+                            await progress_callback("tool_call", {
+                                "tool_name": tool_name,
+                                "tool_input": tool_input
+                            })
+
                         # Call the MCP tool
                         result = await self.call_tool(tool_name, tool_input)
                         result_text = result.content[0].text
@@ -1306,9 +1370,14 @@ Return your final answer as JSON ONLY (no other text):
                 traceback.print_exc()
             diagnoses = []
 
-        # Step 2: Get BNF drug information (direct parsing, no LLM)
+        # Step 2: Get drug information (region-aware: DrugBank for India/International, BNF for UK)
+        # Determine which drug database to use based on region
+        # Only UK (GB) uses BNF, all other regions use DrugBank
+        use_drugbank = self.current_region != "GB"  # All regions except UK use DrugBank
+        resource_name = "DrugBank" if use_drugbank else "BNF"
+
         if verbose:
-            print(f"\n💊 Step 2: Fetching BNF drug information...")
+            print(f"\n💊 Step 2: Fetching {resource_name} drug information...")
 
         # Extract all drug names
         all_drugs = []
@@ -1319,53 +1388,152 @@ Return your final answer as JSON ONLY (no other text):
         # Remove duplicates
         all_drugs = list(set(all_drugs))
 
-        # Search BNF and get detailed info for each drug
+        # Search and get detailed info for each drug (region-aware)
         async def get_drug_details(drug_name):
             try:
-                # Step 2a: Search for drug
-                if verbose:
-                    print(f"   🔍 Searching BNF for: {drug_name}")
+                # Emit progress callback - looking up drug
+                if progress_callback:
+                    await progress_callback("drug_info", {
+                        "medication": drug_name,
+                        "status": "looking_up",
+                        "source": resource_name
+                    })
 
-                search_result = await self.call_tool("search_bnf_drug", {
-                    "drug_name": drug_name
-                })
-                search_data = json.loads(search_result.content[0].text)
-                results = search_data.get('results', [])
-
-                if not results:
+                if use_drugbank:
+                    # DrugBank workflow
                     if verbose:
-                        print(f"      ⚠️  No BNF page found for {drug_name}")
-                    return None
+                        print(f"   🔍 Searching DrugBank for: {drug_name}")
 
-                drug_url = results[0].get('url')
-                if verbose:
-                    print(f"      ✓ Found: {drug_url}")
+                    search_result = await self.call_tool("search_drugbank_drug", {
+                        "drug_name": drug_name
+                    })
+                    search_data = json.loads(search_result.content[0].text)
+                    results = search_data.get('results', [])
 
-                # Step 2b: Get detailed drug info
-                if verbose:
-                    print(f"   📄 Fetching detailed info for: {drug_name}")
+                    if not results:
+                        if verbose:
+                            print(f"      ⚠️  No DrugBank entry found for {drug_name}")
+                        if progress_callback:
+                            await progress_callback("drug_info", {
+                                "medication": drug_name,
+                                "status": "failed",
+                                "source": resource_name
+                            })
+                        return None
 
-                info_result = await self.call_tool("get_bnf_drug_info", {
-                    "drug_url": drug_url
-                })
-                info_data = json.loads(info_result.content[0].text)
-
-                if info_data.get('success'):
+                    drug_url = results[0].get('url')
                     if verbose:
-                        print(f"      ✓ Retrieved structured data")
-                    return {
-                        'drug_name': drug_name,
-                        'url': drug_url,
-                        'bnf_data': info_data
-                    }
+                        print(f"      ✓ Found: {drug_url}")
+
+                    # Get detailed drug info
+                    if verbose:
+                        print(f"   📄 Fetching detailed info for: {drug_name}")
+
+                    info_result = await self.call_tool("get_drugbank_drug_info", {
+                        "drug_url": drug_url
+                    })
+                    info_data = json.loads(info_result.content[0].text)
+
+                    if info_data.get('success'):
+                        if verbose:
+                            print(f"      ✓ Retrieved structured data")
+
+                        if progress_callback:
+                            await progress_callback("drug_info", {
+                                "medication": drug_name,
+                                "status": "complete",
+                                "source": resource_name
+                            })
+
+                        return {
+                            'drug_name': drug_name,
+                            'url': drug_url,
+                            'drugbank_data': info_data  # Use drugbank_data key
+                        }
+                    else:
+                        if verbose:
+                            print(f"      ⚠️  Failed to parse: {info_data.get('error')}")
+                        if progress_callback:
+                            await progress_callback("drug_info", {
+                                "medication": drug_name,
+                                "status": "failed",
+                                "source": resource_name
+                            })
+                        return None
+
                 else:
+                    # BNF workflow (UK)
                     if verbose:
-                        print(f"      ⚠️  Failed to parse: {info_data.get('error')}")
-                    return None
+                        print(f"   🔍 Searching BNF for: {drug_name}")
+
+                    search_result = await self.call_tool("search_bnf_drug", {
+                        "drug_name": drug_name
+                    })
+                    search_data = json.loads(search_result.content[0].text)
+                    results = search_data.get('results', [])
+
+                    if not results:
+                        if verbose:
+                            print(f"      ⚠️  No BNF page found for {drug_name}")
+                        if progress_callback:
+                            await progress_callback("drug_info", {
+                                "medication": drug_name,
+                                "status": "failed",
+                                "source": resource_name
+                            })
+                        return None
+
+                    drug_url = results[0].get('url')
+                    if verbose:
+                        print(f"      ✓ Found: {drug_url}")
+
+                    # Get detailed drug info
+                    if verbose:
+                        print(f"   📄 Fetching detailed info for: {drug_name}")
+
+                    info_result = await self.call_tool("get_bnf_drug_info", {
+                        "drug_url": drug_url
+                    })
+                    info_data = json.loads(info_result.content[0].text)
+
+                    if info_data.get('success'):
+                        if verbose:
+                            print(f"      ✓ Retrieved structured data")
+
+                        if progress_callback:
+                            await progress_callback("drug_info", {
+                                "medication": drug_name,
+                                "status": "complete",
+                                "source": resource_name
+                            })
+
+                        return {
+                            'drug_name': drug_name,
+                            'url': drug_url,
+                            'bnf_data': info_data
+                        }
+                    else:
+                        if verbose:
+                            print(f"      ⚠️  Failed to parse: {info_data.get('error')}")
+                        if progress_callback:
+                            await progress_callback("drug_info", {
+                                "medication": drug_name,
+                                "status": "failed",
+                                "source": resource_name
+                            })
+                        return None
 
             except Exception as e:
                 if verbose:
                     print(f"   ⚠️  Error with {drug_name}: {e}")
+
+                if progress_callback:
+                    await progress_callback("drug_info", {
+                        "medication": drug_name,
+                        "status": "failed",
+                        "source": resource_name
+                    })
+
                 return None
 
         drug_details = []
@@ -1383,34 +1551,54 @@ Return your final answer as JSON ONLY (no other text):
                 if result and not isinstance(result, Exception):
                     drug_details.append(result)
 
-        # Step 3: Add BNF data to diagnoses
+        # Step 3: Add drug data to diagnoses (region-aware)
         if verbose:
-            print(f"\n📋 Step 3: Adding BNF data to diagnoses...")
+            print(f"\n📋 Step 3: Adding {resource_name} data to diagnoses...")
 
         # Create lookup dict
         drug_lookup = {d['drug_name']: d for d in drug_details}
 
         for diag in diagnoses:
             for tx in diag.get('treatments', []):
-                tx['bnf_info'] = {}
+                tx['bnf_info'] = {}  # Keep 'bnf_info' key for compatibility with frontend
 
                 for drug_name in tx.get('drug_names', []):
                     if drug_name in drug_lookup:
                         details = drug_lookup[drug_name]
-                        bnf_data = details['bnf_data']
 
-                        tx['bnf_info'][drug_name] = {
-                            'url': details['url'],
-                            'indications': bnf_data.get('indications', 'Not available'),
-                            'dosage': bnf_data.get('dosage', 'Not available'),
-                            'contraindications': bnf_data.get('contraindications', 'Not available'),
-                            'cautions': bnf_data.get('cautions', 'Not available'),
-                            'side_effects': bnf_data.get('side_effects', 'Not available'),
-                            'interactions': bnf_data.get('interactions', 'Not available'),
-                        }
+                        # Handle both BNF and DrugBank data structures
+                        if 'drugbank_data' in details:
+                            # DrugBank data structure
+                            drugbank_data = details['drugbank_data']
+                            tx['bnf_info'][drug_name] = {
+                                'url': details['url'],
+                                'indications': drugbank_data.get('indications', 'Not available'),
+                                'dosage': 'See full prescribing information',  # DrugBank doesn't have dosage in same format
+                                'contraindications': drugbank_data.get('toxicity', 'Not available'),
+                                'cautions': 'See full drug information',
+                                'side_effects': drugbank_data.get('toxicity', 'Not available'),
+                                'interactions': 'Check drug interactions database',
+                                'pharmacodynamics': drugbank_data.get('pharmacodynamics', 'Not available'),
+                                'mechanism': drugbank_data.get('mechanism_of_action', 'Not available'),
+                                'absorption': drugbank_data.get('absorption', 'Not available'),
+                                'metabolism': drugbank_data.get('metabolism', 'Not available'),
+                                'half_life': drugbank_data.get('half_life', 'Not available'),
+                            }
+                        else:
+                            # BNF data structure
+                            bnf_data = details['bnf_data']
+                            tx['bnf_info'][drug_name] = {
+                                'url': details['url'],
+                                'indications': bnf_data.get('indications', 'Not available'),
+                                'dosage': bnf_data.get('dosage', 'Not available'),
+                                'contraindications': bnf_data.get('contraindications', 'Not available'),
+                                'cautions': bnf_data.get('cautions', 'Not available'),
+                                'side_effects': bnf_data.get('side_effects', 'Not available'),
+                                'interactions': bnf_data.get('interactions', 'Not available'),
+                            }
 
                         if verbose:
-                            print(f"   ✓ Added BNF data for: {drug_name}")
+                            print(f"   ✓ Added {resource_name} data for: {drug_name}")
 
         # Step 4: Generate summary
         if verbose:
@@ -2448,6 +2636,25 @@ Be extremely concise. Focus on key dose adjustments and safety warnings only."""
                     f"Please add credits at: https://console.anthropic.com/settings/billing\n"
                     f"The application cannot continue without API access."
                 ) from e
+
+    async def disconnect_servers(self):
+        """Disconnect from all currently connected MCP servers."""
+        # Clear sessions and tool registry
+        self.sessions.clear()
+        self.tool_registry.clear()
+        self.current_region = None
+
+        # Close the exit stack and recreate it
+        try:
+            await self.exit_stack.aclose()
+        except (RuntimeError, ExceptionGroup) as e:
+            # Known issue with Python 3.13 + anyio + multiple MCP servers
+            # The cleanup still happens, we just suppress the task scope error
+            if "cancel scope" not in str(e).lower():
+                raise  # Re-raise if it's a different error
+
+        # Create a new exit stack for the next connection
+        self.exit_stack = AsyncExitStack()
 
     async def cleanup(self):
         """Clean up resources."""
