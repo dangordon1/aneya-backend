@@ -41,7 +41,7 @@ class RegionConfig:
     country_codes: List[str]
     required_servers: List[str]  # MCP servers needed for this region
     searches: List[SearchConfig]
-    min_results_threshold: int = 2  # Minimum results before falling back to PubMed
+    min_results_threshold: int = 1  # Minimum results before falling back to PubMed
     pubmed_fallback: bool = True    # Whether to use PubMed as fallback
 
 
@@ -77,14 +77,14 @@ REGION_CONFIGS = {
                 required=False
             )
         ],
-        min_results_threshold=2,
+        min_results_threshold=1,
         pubmed_fallback=True
     ),
 
     "INDIA": RegionConfig(
         region_name="India",
         country_codes=["IN"],
-        required_servers=["patient_info", "fogsi", "drugbank", "pubmed"],
+        required_servers=["patient_info", "fogsi", "nhm", "aiims", "bnf", "pubmed"],
         searches=[
             SearchConfig(
                 resource_type=ResourceType.GUIDELINE,
@@ -95,28 +95,44 @@ REGION_CONFIGS = {
                 required=True
             ),
             SearchConfig(
+                resource_type=ResourceType.GUIDELINE,
+                tool_name="search_nhm_guidelines",
+                tool_params={"keyword": "{clinical_scenario}", "max_results": 10},
+                result_key="nhm_guidelines",
+                deduplicate=False,
+                required=False
+            ),
+            SearchConfig(
+                resource_type=ResourceType.GUIDELINE,
+                tool_name="search_aiims_guidelines",
+                tool_params={"keyword": "{clinical_scenario}", "max_results": 10},
+                result_key="aiims_protocols",
+                deduplicate=False,
+                required=False
+            ),
+            SearchConfig(
                 resource_type=ResourceType.TREATMENT,
-                tool_name="search_drugbank_by_condition",
+                tool_name="search_bnf_treatment_summaries",
                 tool_params={"condition": "{clinical_scenario}"},
-                result_key="drugbank_drugs",
+                result_key="bnf_summaries",
                 deduplicate=True,
                 required=False
             )
         ],
         min_results_threshold=1,
-        pubmed_fallback=True  # Always search PubMed for India
+        pubmed_fallback=True
     ),
 
     "INTERNATIONAL": RegionConfig(
         region_name="International",
         country_codes=["default"],
-        required_servers=["patient_info", "drugbank", "pubmed"],
+        required_servers=["patient_info", "bnf", "pubmed"],  # Changed from drugbank to bnf
         searches=[
             SearchConfig(
                 resource_type=ResourceType.TREATMENT,
-                tool_name="search_drugbank_by_condition",
+                tool_name="search_bnf_treatment_summaries",
                 tool_params={"condition": "{clinical_scenario}"},
-                result_key="drugbank_drugs",
+                result_key="bnf_summaries",
                 deduplicate=True,
                 required=False
             )
@@ -137,13 +153,15 @@ for region_key, config in REGION_CONFIGS.items():
 # Server paths
 SERVERS_DIR = Path(__file__).parent.parent  # Go up from clinical_decision_support/ to servers/
 MCP_SERVERS = {
-    "patient_info": str(SERVERS_DIR / "patient_info_server.py"),
-    "nice": str(SERVERS_DIR / "nice_guidelines_server.py"),
-    "bnf": str(SERVERS_DIR / "bnf_server.py"),  # UK only
-    "fogsi": str(SERVERS_DIR / "fogsi_server.py"),  # FOGSI Guidelines (India)
-    "drugbank": str(SERVERS_DIR / "drugbank_server.py"),  # DrugBank (India + International)
-    "mims": str(SERVERS_DIR / "mims_india_server.py"),  # MIMS Drug Info (India) - reserved for future API access
-    "pubmed": str(SERVERS_DIR / "pubmed_server.py")
+    "patient_info": str(SERVERS_DIR / "patient_context" / "patient_info_server.py"),
+    "nice": str(SERVERS_DIR / "guidelines" / "uk" / "nice_guidelines_server.py"),
+    "bnf": str(SERVERS_DIR / "drug_lookup" / "bnf_server.py"),  # UK + all regions
+    "fogsi": str(SERVERS_DIR / "guidelines" / "india" / "fogsi_server.py"),  # FOGSI Guidelines (India)
+    "nhm": str(SERVERS_DIR / "guidelines" / "india" / "nhm_guidelines_server.py"),  # NHM Guidelines (India)
+    "aiims": str(SERVERS_DIR / "guidelines" / "india" / "aiims_server.py"),  # AIIMS Trauma & Orthopedic Protocols (India)
+    "drugbank": str(SERVERS_DIR / "drug_lookup" / "drugbank_server.py"),  # DrugBank (India + International)
+    "mims": str(SERVERS_DIR / "drug_lookup" / "mims_india_server.py"),  # MIMS Drug Info (India) - reserved for future API access
+    "pubmed": str(SERVERS_DIR / "medical_literature" / "pubmed_server.py")
 }
 
 # Region-specific server mapping (generated from REGION_CONFIGS)
@@ -151,6 +169,17 @@ REGION_SERVERS = {}
 for region_key, config in REGION_CONFIGS.items():
     for country_code in config.country_codes:
         REGION_SERVERS[country_code] = config.required_servers
+
+
+# ============================================================================
+# Server Groupings for Engine-Based Architecture
+# ============================================================================
+
+# Servers owned by DiagnosisEngine (guidelines + patient context)
+GUIDELINE_SERVERS = ["patient_info", "nice", "fogsi", "nhm", "aiims", "pubmed"]
+
+# Servers owned by DrugInfoRetriever (drug information)
+DRUG_SERVERS = ["bnf", "drugbank"]
 
 
 __all__ = [
@@ -161,5 +190,7 @@ __all__ = [
     'COUNTRY_TO_REGION',
     'SERVERS_DIR',
     'MCP_SERVERS',
-    'REGION_SERVERS'
+    'REGION_SERVERS',
+    'GUIDELINE_SERVERS',
+    'DRUG_SERVERS'
 ]

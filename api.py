@@ -24,17 +24,19 @@ load_dotenv()
 
 # Add servers directory to path (servers is in the backend repo root)
 sys.path.insert(0, str(Path(__file__).parent / "servers"))
-from clinical_decision_support_client import ClinicalDecisionSupportClient
+from clinical_decision_support.client import ClinicalDecisionSupportClient
+from clinical_decision_support import ConsultationSummary
 
 # Global instances (reused across requests)
 client: Optional[ClinicalDecisionSupportClient] = None
-deepgram_client = None  # Deepgram API client for transcription
+elevenlabs_client = None  # ElevenLabs API client for transcription
+consultation_summary: Optional[ConsultationSummary] = None  # Consultation summarizer
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
-    global client, deepgram_client
+    global client, elevenlabs_client, consultation_summary
 
     # Startup
     print("🚀 Starting Aneya API...")
@@ -60,19 +62,23 @@ async def lifespan(app: FastAPI):
 
     print(f"✅ Anthropic API key loaded (ends with ...{anthropic_key[-4:]})")
 
-    # Initialize Deepgram client for transcription
-    deepgram_key = os.getenv("DEEPGRAM_API_KEY")
-    if deepgram_key:
-        from deepgram import DeepgramClient
-        deepgram_client = DeepgramClient(api_key=deepgram_key)
-        print(f"✅ Deepgram API key loaded (ends with ...{deepgram_key[-4:]})")
+    # Initialize ElevenLabs client for transcription
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+    if elevenlabs_key:
+        from elevenlabs import ElevenLabs
+        elevenlabs_client = ElevenLabs(api_key=elevenlabs_key)
+        print(f"✅ ElevenLabs API key loaded (ends with ...{elevenlabs_key[-4:]})")
     else:
-        print("⚠️  DEEPGRAM_API_KEY not found - transcription will not work")
+        print("⚠️  ELEVENLABS_API_KEY not found - voice transcription and diarization will not work")
 
     # Initialize client but DON'T connect to servers yet
     # Servers will be connected per-request based on user's region (detected from IP)
     client = ClinicalDecisionSupportClient(anthropic_api_key=anthropic_key)
     print("✅ Client initialized (servers will be loaded based on user region)")
+
+    # Initialize consultation summary system
+    consultation_summary = ConsultationSummary(anthropic_api_key=anthropic_key)
+    print("✅ Consultation summary system initialized")
 
     yield
 
@@ -240,7 +246,7 @@ async def analyze_consultation(request: AnalysisRequest):
 
         # Step 2: Connect to region-specific MCP servers
         # Only connect if not already connected (check if we have sessions)
-        if not client.sessions:
+        if not client.diagnosis_engine.sessions:
             print(f"🔄 Connecting to region-specific MCP servers for {location_to_use or 'default'}...")
             await client.connect_to_servers(country_code=location_to_use, verbose=True)
         else:
@@ -253,7 +259,8 @@ async def analyze_consultation(request: AnalysisRequest):
             patient_age=patient_age,  # Use normalized value (None if empty)
             allergies=allergies,  # Use normalized value (None if empty)
             location_override=location_to_use,
-            verbose=True  # This will show ALL the Anthropic API calls and processing steps
+            verbose=True,  # This will show ALL the Anthropic API calls and processing steps
+            max_drugs=0  # Disable BNF drug lookups for faster analysis
         )
 
         print(f"\n{'='*70}")
@@ -375,45 +382,69 @@ async def analyze_consultation_stream(request: AnalysisRequest):
 
             # Stream events as they come from the analysis
             result = None
+            events_processed = 0
+
+            # Helper to process a single event
+            def process_event(event_type: str, data: dict):
+                nonlocal events_processed
+                events_processed += 1
+                print(f"[API] Processing event #{events_processed}: {event_type}", flush=True)
+
+                if event_type == "tool_call":
+                    tool_name = data.get("tool_name", "")
+                    if "search" in tool_name.lower() or "nice" in tool_name.lower() or "bnf" in tool_name.lower():
+                        return send_event("guideline_search", {
+                            "source": tool_name,
+                            "query": data.get("tool_input", {})
+                        })
+                elif event_type == "bnf_drug":
+                    return send_event("bnf_drug", data)
+                elif event_type == "drug_update":
+                    print(f"[API] Sending drug_update: {data.get('drug_name')} - {data.get('status')}", flush=True)
+                    return send_event("drug_update", data)
+                elif event_type == "diagnoses":
+                    return send_event("diagnoses", data)
+                return None
+
             while True:
                 try:
                     # Check if analysis is done
                     if analysis_task.done():
+                        print(f"[API] Analysis task completed, draining event queue...", flush=True)
                         result = analysis_task.result()
-                        # Drain any remaining events
-                        while not event_queue.empty():
-                            event_type, data = await event_queue.get()
-                            if event_type == "tool_call":
-                                # Emit guideline search event
-                                tool_name = data.get("tool_name", "")
-                                if "search" in tool_name.lower() or "nice" in tool_name.lower() or "bnf" in tool_name.lower():
-                                    yield send_event("guideline_search", {
-                                        "source": tool_name,
-                                        "query": data.get("tool_input", {})
-                                    })
-                            elif event_type == "bnf_drug":
-                                yield send_event("bnf_drug", data)
+
+                        # Drain remaining events with a small delay to ensure queue is populated
+                        await asyncio.sleep(0.1)
+
+                        drain_count = 0
+                        while True:
+                            try:
+                                # Use wait_for with short timeout instead of empty() check
+                                event_type, data = await asyncio.wait_for(event_queue.get(), timeout=0.5)
+                                drain_count += 1
+                                sse_event = process_event(event_type, data)
+                                if sse_event:
+                                    yield sse_event
+                            except asyncio.TimeoutError:
+                                # Queue is truly empty
+                                print(f"[API] Queue drained: {drain_count} events", flush=True)
+                                break
                         break
 
                     # Wait for next event with timeout
                     try:
                         event_type, data = await asyncio.wait_for(event_queue.get(), timeout=0.1)
-                        if event_type == "tool_call":
-                            # Emit guideline search event
-                            tool_name = data.get("tool_name", "")
-                            if "search" in tool_name.lower() or "nice" in tool_name.lower() or "bnf" in tool_name.lower():
-                                yield send_event("guideline_search", {
-                                    "source": tool_name,
-                                    "query": data.get("tool_input", {})
-                                })
-                        elif event_type == "bnf_drug":
-                            yield send_event("bnf_drug", data)
+                        sse_event = process_event(event_type, data)
+                        if sse_event:
+                            yield sse_event
                     except asyncio.TimeoutError:
                         # No events, continue waiting for analysis
                         continue
 
                 except Exception as e:
-                    print(f"Error processing event: {e}")
+                    print(f"[API] Error processing event: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
                     break
 
             # Check for invalid input error
@@ -474,21 +505,396 @@ async def get_examples():
     }
 
 
+@app.post("/api/translate")
+async def translate_text(request: dict):
+    """
+    Translate text to English using Google Translate
+
+    Automatically detects the source language and translates to English.
+    If the text is already in English, returns it unchanged.
+
+    Args:
+        request: {"text": "text to translate"}
+
+    Returns:
+        {
+            "success": true,
+            "original_text": "original text",
+            "translated_text": "translated text",
+            "detected_language": "hi",
+            "detected_language_name": "Hindi"
+        }
+    """
+    from deep_translator import GoogleTranslator
+
+    text = request.get("text", "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+
+    try:
+        # Use Google Translate via deep-translator (no API key needed for personal use)
+        translator = GoogleTranslator(source='auto', target='en')
+        translated = translator.translate(text)
+
+        # Detect source language (deep-translator auto-detects)
+        # For language detection, we'll use a simple heuristic or accept it as-is
+        detected_lang = 'auto'  # deep-translator doesn't return detected language directly
+
+        return {
+            "success": True,
+            "original_text": text,
+            "translated_text": translated,
+            "detected_language": detected_lang,
+            "detected_language_name": "Auto-detected"
+        }
+
+    except Exception as e:
+        print(f"❌ Translation error: {str(e)}")
+        # Return original text if translation fails
+        return {
+            "success": False,
+            "original_text": text,
+            "translated_text": text,  # Fallback to original
+            "detected_language": "unknown",
+            "detected_language_name": "Unknown",
+            "error": str(e)
+        }
+
+
+@app.post("/api/summarize")
+async def summarize_text(request: dict):
+    """
+    Summarize consultation transcript using ConsultationSummary system
+
+    Takes a diarized consultation transcript and generates a comprehensive
+    clinical summary with speaker identification, timeline extraction, and
+    structured SOAP note format.
+
+    Args:
+        request: {
+            "text": "diarized transcript with [timestamp] speaker_X: format",
+            "patient_info": {  # Optional
+                "patient_id": "P001",
+                "patient_age": "30 years old",
+                "allergies": "None"
+            }
+        }
+
+    Returns:
+        Comprehensive JSON summary with:
+        - speakers: Doctor/patient mapping
+        - metadata: Patient info, consultation duration
+        - timeline: Symptom onset and progression
+        - clinical_summary: Full SOAP note
+        - key_concerns: Patient concerns
+        - recommendations_given: Medical advice
+    """
+    if consultation_summary is None:
+        raise HTTPException(status_code=503, detail="Consultation summary system not initialized")
+
+    text = request.get("text", "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+
+    patient_info = request.get("patient_info")
+
+    try:
+        print(f"\n{'='*70}")
+        print(f"📝 SUMMARIZING CONSULTATION")
+        print(f"{'='*70}")
+        print(f"Transcript length: {len(text)} characters")
+        if patient_info:
+            print(f"Patient info provided: {list(patient_info.keys())}")
+        print(f"{'='*70}\n")
+
+        # Generate comprehensive summary
+        result = await consultation_summary.summarize(
+            transcript=text,
+            patient_info=patient_info
+        )
+
+        print(f"\n{'='*70}")
+        print(f"✅ SUMMARY COMPLETE")
+        print(f"{'='*70}")
+        if 'speakers' in result:
+            print(f"Speakers identified: {result['speakers']}")
+        if 'timeline' in result:
+            print(f"Timeline events: {len(result.get('timeline', []))}")
+        if 'clinical_summary' in result:
+            cc = result['clinical_summary'].get('chief_complaint', 'N/A')
+            print(f"Chief complaint: {cc[:100]}...")
+        print(f"{'='*70}\n")
+
+        # Create a simple text summary for backward compatibility with frontend
+        simple_summary = ""
+        if 'clinical_summary' in result:
+            cs = result['clinical_summary']
+            simple_summary = f"{cs.get('chief_complaint', '')}\n\n{cs.get('history_present_illness', '')}"
+
+        return {
+            "success": True,
+            "summary": simple_summary,  # Simple text for frontend compatibility
+            **result  # Full structured data
+        }
+
+    except Exception as e:
+        print(f"❌ Summarization error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
+
+
+@app.get("/api/get-transcription-token")
+async def get_transcription_token():
+    """
+    Generate a temporary token for ElevenLabs speech-to-text WebSocket connection
+
+    This endpoint provides secure client-side access to ElevenLabs by generating
+    a single-use token that expires after 15 minutes.
+
+    Returns:
+        JSON with temporary token for WebSocket authentication
+    """
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+    if not elevenlabs_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Transcription service not configured. ELEVENLABS_API_KEY is required."
+        )
+
+    try:
+        print("🔑 Generating ElevenLabs temporary token...")
+
+        # Call ElevenLabs API to generate single-use token
+        async with httpx.AsyncClient() as http_client:
+            response = await http_client.post(
+                "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
+                headers={"xi-api-key": elevenlabs_key}
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        print(f"✅ Token generated (expires in 15 minutes)")
+
+        return {
+            "token": data["token"],
+            "model": "scribe_v2_realtime",
+            "provider": "elevenlabs"
+        }
+
+    except Exception as e:
+        print(f"❌ Token generation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Token generation failed: {str(e)}")
+
+
+@app.post("/api/diarize")
+async def diarize_audio(
+    audio: UploadFile = File(...),
+    num_speakers: Optional[int] = None,
+    diarization_threshold: float = 0.22
+):
+    """
+    Perform speaker diarization on audio using ElevenLabs Scribe v1 API
+
+    This endpoint uses the batch Scribe v1 model which supports speaker segmentation.
+    Returns word-level timestamps with speaker IDs for multi-speaker conversations.
+
+    Args:
+        audio: Audio file (webm, wav, mp3, etc.)
+        num_speakers: Optional expected number of speakers (if known)
+        diarization_threshold: Threshold for speaker change detection (0.1-0.4, default 0.22)
+
+    Returns:
+        {
+            "success": true,
+            "segments": [{"speaker_id": "speaker_1", "text": "...", "start_time": 0.0, "end_time": 1.5}],
+            "detected_speakers": ["speaker_1", "speaker_2", ...],
+            "full_transcript": "complete text"
+        }
+    """
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+    if not elevenlabs_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Diarization service not configured. ELEVENLABS_API_KEY is required."
+        )
+
+    try:
+        print(f"🎤 Diarizing audio file: {audio.filename}")
+
+        # Read audio content
+        content = await audio.read()
+        audio_size_kb = len(content) / 1024
+        print(f"📊 Audio file size: {audio_size_kb:.2f} KB ({len(content)} bytes)")
+
+        # Save to temporary file
+        # Note: ElevenLabs Scribe v1 may prefer common formats like mp3, wav
+        # Convert webm to mp3 if needed
+        import subprocess
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp_file:
+            temp_file.write(content)
+            webm_path = temp_file.name
+
+        # Convert to mp3 format which is more universally supported
+        mp3_path = webm_path.replace('.webm', '.mp3')
+        try:
+            # Use ffmpeg to convert webm to mp3
+            result = subprocess.run(
+                ['ffmpeg', '-i', webm_path, '-acodec', 'libmp3lame', '-ab', '128k', mp3_path, '-y'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                print(f"⚠️  FFmpeg conversion failed: {result.stderr}")
+                print(f"   Trying with webm directly...")
+                temp_path = webm_path
+            else:
+                print(f"✅ Converted webm to mp3 for better compatibility")
+                os.unlink(webm_path)  # Remove webm file
+                temp_path = mp3_path
+        except FileNotFoundError:
+            print("⚠️  FFmpeg not found - using webm directly (may fail)")
+            temp_path = webm_path
+        except Exception as e:
+            print(f"⚠️  Conversion error: {e} - using webm directly")
+            temp_path = webm_path
+
+        try:
+            start = time.time()
+
+            # Call ElevenLabs Scribe v1 API with diarization
+            async with httpx.AsyncClient(timeout=60.0) as http_client:
+                with open(temp_path, 'rb') as audio_file:
+                    # Set correct MIME type based on file format
+                    mime_type = 'audio/mpeg' if temp_path.endswith('.mp3') else 'audio/webm'
+                    filename = 'audio.mp3' if temp_path.endswith('.mp3') else (audio.filename or 'audio.webm')
+                    # IMPORTANT: ElevenLabs expects 'file' not 'audio'
+                    files = {'file': (filename, audio_file, mime_type)}
+
+                    # Build parameters
+                    params = {
+                        'model_id': 'scribe_v1',
+                        'diarize': 'true',
+                        'diarization_threshold': str(diarization_threshold),
+                        'timestamps_granularity': 'word'
+                    }
+
+                    if num_speakers:
+                        params['num_speakers'] = str(num_speakers)
+
+                    response = await http_client.post(
+                        'https://api.elevenlabs.io/v1/speech-to-text',
+                        headers={'xi-api-key': elevenlabs_key},
+                        files=files,
+                        data=params
+                    )
+
+                    # Debug: Log response status and body
+                    if not response.is_success:
+                        error_body = response.text
+                        print(f"❌ ElevenLabs API Error ({response.status_code}): {error_body}")
+
+                    response.raise_for_status()
+                    data = response.json()
+
+            latency = time.time() - start
+
+            # Debug: Log raw API response
+            print(f"📋 Raw API response keys: {list(data.keys())}")
+            if 'words' in data and len(data['words']) > 0:
+                print(f"📝 First word example: {data['words'][0]}")
+                print(f"📝 Total words: {len(data['words'])}")
+
+            # Parse response - Scribe v1 with diarization returns:
+            # {
+            #   "text": "full transcript",
+            #   "words": [{"text": "...", "start": 0.0, "end": 0.5, "speaker": "speaker_1"}, ...]
+            # }
+
+            full_transcript = data.get('text', '')
+            words = data.get('words', [])
+
+            # Group words by speaker into segments
+            segments = []
+            detected_speakers = set()
+
+            if words:
+                current_speaker = words[0].get('speaker_id')
+                current_text = []
+                segment_start = words[0].get('start', 0.0)
+
+                for word_data in words:
+                    speaker = word_data.get('speaker_id')
+                    word_text = word_data.get('text', '')
+
+                    detected_speakers.add(speaker)
+
+                    if speaker == current_speaker:
+                        current_text.append(word_text)
+                    else:
+                        # Speaker changed - save current segment
+                        segments.append({
+                            'speaker_id': current_speaker,
+                            'text': ' '.join(current_text),
+                            'start_time': segment_start,
+                            'end_time': word_data.get('start', 0.0)
+                        })
+
+                        # Start new segment
+                        current_speaker = speaker
+                        current_text = [word_text]
+                        segment_start = word_data.get('start', 0.0)
+
+                # Add final segment
+                if current_text:
+                    segments.append({
+                        'speaker_id': current_speaker,
+                        'text': ' '.join(current_text),
+                        'start_time': segment_start,
+                        'end_time': words[-1].get('end', 0.0)
+                    })
+
+            print(f"✅ Diarization complete in {latency:.2f}s")
+            print(f"👥 Detected {len(detected_speakers)} speakers: {sorted(detected_speakers)}")
+            print(f"📝 Generated {len(segments)} speaker segments")
+
+            return {
+                'success': True,
+                'segments': segments,
+                'detected_speakers': sorted(list(detected_speakers)),
+                'full_transcript': full_transcript,
+                'latency_seconds': round(latency, 2),
+                'model': 'elevenlabs/scribe_v1'
+            }
+
+        finally:
+            # Clean up temp file
+            os.unlink(temp_path)
+
+    except Exception as e:
+        print(f"❌ Diarization error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Diarization failed: {str(e)}")
+
+
 @app.post("/api/transcribe")
 async def transcribe_audio(audio: UploadFile = File(...)):
     """
-    Transcribe audio using Deepgram API
+    Transcribe audio using ElevenLabs Scribe v2 Realtime API
 
     Args:
         audio: Audio file (webm, wav, mp3, etc.)
 
     Returns:
-        Transcribed text with fast cloud-based transcription (~300ms latency)
+        Transcribed text with ultra-low latency (~150ms) and automatic language detection
     """
-    if deepgram_client is None:
+    if elevenlabs_client is None:
         raise HTTPException(
             status_code=503,
-            detail="Transcription service not configured. DEEPGRAM_API_KEY is required."
+            detail="Transcription service not configured. ELEVENLABS_API_KEY is required."
         )
 
     try:
@@ -499,46 +905,38 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         audio_size_kb = len(content) / 1024
         print(f"📊 Audio file size: {audio_size_kb:.2f} KB ({len(content)} bytes)")
 
-        # Determine the mimetype
-        filename = audio.filename or "audio.webm"
-        if filename.endswith(".webm"):
-            mimetype = "audio/webm"
-        elif filename.endswith(".wav"):
-            mimetype = "audio/wav"
-        elif filename.endswith(".mp3"):
-            mimetype = "audio/mp3"
-        else:
-            mimetype = "audio/webm"  # Default for browser recordings
-
-        # Transcribe using Deepgram
+        # Transcribe using ElevenLabs Scribe v2 Realtime
         start = time.time()
 
-        # Use the SDK v5 listen API - deepgram_client.listen.v1.media.transcribe_file()
-        response = deepgram_client.listen.v1.media.transcribe_file(
-            request=content,
-            model="nova-2",
-            language="en",
-            smart_format=True,
-            punctuate=True,
+        # Convert bytes to BytesIO for file-like object
+        from io import BytesIO
+        audio_data = BytesIO(content)
+        audio_data.name = audio.filename or "audio.webm"
+
+        # Call ElevenLabs speech-to-text API
+        # No language_code specified - auto-detect from 90+ languages
+        response = elevenlabs_client.speech_to_text.convert(
+            file=audio_data,
+            model_id="scribe_v2_realtime"
         )
         latency = time.time() - start
 
-        # Extract transcription from response (SDK v5 format)
-        # Structure: response.results.channels[0].alternatives[0].transcript
-        transcription = ""
-        if response and response.results and response.results.channels:
-            channel = response.results.channels[0]
-            if channel.alternatives:
-                transcription = channel.alternatives[0].transcript or ""
+        # Extract transcription from response
+        # ElevenLabs response includes: text, language_code, and other metadata
+        transcription = response.text if hasattr(response, 'text') else ""
+        detected_language = response.language_code if hasattr(response, 'language_code') else None
 
         print(f"✅ Transcription complete in {latency:.2f}s")
+        print(f"🌍 Detected language: {detected_language}")
         print(f"📝 Full transcription text: '{transcription}'")
 
         return {
             "success": True,
             "text": transcription.strip(),
+            "detected_language": detected_language,
+            "translated_text": None,  # Placeholder for future translation feature
             "latency_seconds": round(latency, 2),
-            "model": "deepgram/nova-2"
+            "model": "elevenlabs/scribe_v2_realtime"
         }
 
     except Exception as e:
@@ -546,6 +944,36 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+# ============================================================================
+# APPOINTMENTS ENDPOINTS
+# ============================================================================
+
+@app.patch("/api/appointments/{appointment_id}/status")
+async def update_appointment_status(
+    appointment_id: str,
+    request: dict
+):
+    """
+    Update appointment status (e.g., mark as completed, cancelled)
+
+    This is a placeholder endpoint for the appointments feature.
+    In production, this would update a database.
+    """
+    new_status = request.get("status")
+
+    if not new_status:
+        raise HTTPException(status_code=400, detail="Status is required")
+
+    # TODO: Implement actual database update
+    # For now, just return success
+    return {
+        "success": True,
+        "appointment_id": appointment_id,
+        "status": new_status,
+        "message": "Appointment status updated (placeholder)"
+    }
 
 
 if __name__ == "__main__":

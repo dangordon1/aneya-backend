@@ -6,7 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.43.1",
     "beautifulsoup4>=4.14.2",
-    "deepgram-sdk>=5.3.0",
+    "deep-translator>=1.11.0",
+    "elevenlabs>=1.0.0",
     "fastapi>=0.121.2",
     "fastmcp>=2.13.0.2",
     "firebase-admin>=7.1.0",
