@@ -236,6 +236,44 @@ def search_drugbank_drug(drug_name: str) -> Dict[str, Any]:
         soup = BeautifulSoup(response.content, 'html.parser')
         results = []
 
+        # Check if DrugBank redirected to a single drug page instead of showing search results
+        # This happens when the search term exactly matches a drug name
+        # We can detect this by checking for the drug detail page structure
+        structure_heading = soup.find('h4', string=lambda s: s and 'Structure for' in s)
+        h1_tag = soup.find('h1')
+
+        if structure_heading and h1_tag:
+            # This is a drug detail page, extract the drug from the heading
+            heading_text = structure_heading.get_text(strip=True)
+            # Format: "Structure for Drug Name (DB#####)"
+            import re
+            match = re.search(r'Structure for (.+) \((DB\d{5})\)', heading_text)
+            if match:
+                drug_name = match.group(1)
+                drugbank_id = match.group(2)
+                full_url = f"{BASE_URL}/drugs/{drugbank_id}"
+
+                print(f"🎯 DrugBank redirected to single drug page: {drug_name} ({drugbank_id})", file=sys.stderr)
+
+                result = {
+                    'query': drug_name,
+                    'results': [{
+                        'name': drug_name,
+                        'drugbank_id': drugbank_id,
+                        'url': full_url,
+                        'type': 'Drug'
+                    }],
+                    'count': 1,
+                    'success': True,
+                    'error': None,
+                    'debug_info': debug_info
+                }
+
+                # Cache the result
+                cache.set('search_drug', drug_name, result)
+
+                return result
+
         # Look for drug links in search results
         # DrugBank uses /drugs/DBXXXXX pattern
         drug_links = soup.find_all('a', href=True)
