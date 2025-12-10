@@ -19,6 +19,8 @@ import httpx
 import tempfile
 import time
 import asyncio
+import uuid
+from google.cloud import storage
 # Load environment variables from .env file
 load_dotenv()
 
@@ -31,12 +33,14 @@ from clinical_decision_support import ConsultationSummary
 client: Optional[ClinicalDecisionSupportClient] = None
 elevenlabs_client = None  # ElevenLabs API client for transcription
 consultation_summary: Optional[ConsultationSummary] = None  # Consultation summarizer
+gcs_client = None  # Google Cloud Storage client
+GCS_BUCKET_NAME = "aneya-audio-recordings"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
-    global client, elevenlabs_client, consultation_summary
+    global client, elevenlabs_client, consultation_summary, gcs_client
 
     # Startup
     print("🚀 Starting Aneya API...")
@@ -80,6 +84,13 @@ async def lifespan(app: FastAPI):
     consultation_summary = ConsultationSummary(anthropic_api_key=anthropic_key)
     print("✅ Consultation summary system initialized")
 
+    # Initialize GCS client for audio storage
+    try:
+        gcs_client = storage.Client()
+        print(f"✅ GCS client initialized (bucket: {GCS_BUCKET_NAME})")
+    except Exception as e:
+        print(f"⚠️  GCS client initialization failed: {e} - audio upload will not work")
+
     yield
 
     # Shutdown
@@ -101,6 +112,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",  # Local development
         "http://localhost:5174",  # Local development (alternative port)
+        "http://localhost:5175",  # Local development (alternative port)
+        "http://localhost:5176",  # Local development (alternative port)
         "http://localhost:3000",
         "https://aneya.vercel.app",  # Production frontend
     ],
@@ -631,10 +644,44 @@ async def summarize_text(request: dict):
             cs = result['clinical_summary']
             simple_summary = f"{cs.get('chief_complaint', '')}\n\n{cs.get('history_present_illness', '')}"
 
+        # Build unified consultation data format matching database columns
+        # AI-specific fields are set to null/empty - populated after analyze is called
+        consultation_data = {
+            # Transcript data
+            "consultation_text": simple_summary,  # Summary text for display
+            "original_transcript": text,  # Original transcript
+            "transcription_language": result.get('detected_language'),
+
+            # Patient snapshot - to be filled by frontend with patient details
+            "patient_snapshot": patient_info or {},
+
+            # AI Analysis fields - NA until analyze is called
+            "analysis_result": None,
+            "diagnoses": [],
+            "guidelines_found": [],
+
+            # Metadata
+            "consultation_duration_seconds": result.get('metadata', {}).get('consultation_duration_seconds'),
+            "location_detected": result.get('metadata', {}).get('location'),
+            "backend_api_version": "1.0.0",
+
+            # Full summary data for reference
+            "summary_data": {
+                "speakers": result.get('speakers'),
+                "metadata": result.get('metadata'),
+                "timeline": result.get('timeline'),
+                "clinical_summary": result.get('clinical_summary'),
+                "key_concerns": result.get('key_concerns'),
+                "recommendations_given": result.get('recommendations_given'),
+                "follow_up": result.get('follow_up')
+            }
+        }
+
         return {
             "success": True,
             "summary": simple_summary,  # Simple text for frontend compatibility
-            **result  # Full structured data
+            "consultation_data": consultation_data,  # Unified format for saving
+            **result  # Full structured data for backward compatibility
         }
 
     except Exception as e:
@@ -944,6 +991,96 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+# ============================================================================
+# AUDIO STORAGE ENDPOINTS
+# ============================================================================
+
+@app.post("/api/upload-audio")
+async def upload_audio_to_gcs(
+    audio: UploadFile = File(...),
+    session_id: Optional[str] = None
+):
+    """
+    Upload audio recording to Google Cloud Storage
+
+    Args:
+        audio: Audio file (webm, wav, mp3, etc.)
+        session_id: Optional session ID for organizing recordings
+
+    Returns:
+        {
+            "success": true,
+            "gcs_uri": "gs://aneya-audio-recordings/...",
+            "public_url": "https://storage.googleapis.com/...",
+            "filename": "...",
+            "size_bytes": 12345
+        }
+    """
+    if gcs_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Audio storage service not configured. GCS client is required."
+        )
+
+    try:
+        # Read audio content
+        content = await audio.read()
+        audio_size_kb = len(content) / 1024
+        print(f"📤 Uploading audio file: {audio.filename} ({audio_size_kb:.2f} KB)")
+
+        # Generate unique filename with timestamp and UUID
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        unique_id = str(uuid.uuid4())[:8]
+
+        # Determine file extension from original filename or content type
+        ext = ".webm"
+        if audio.filename:
+            ext = os.path.splitext(audio.filename)[1] or ext
+        elif audio.content_type:
+            ext_map = {
+                "audio/webm": ".webm",
+                "audio/mp3": ".mp3",
+                "audio/mpeg": ".mp3",
+                "audio/wav": ".wav",
+                "audio/ogg": ".ogg"
+            }
+            ext = ext_map.get(audio.content_type, ext)
+
+        # Build path with optional session organization
+        if session_id:
+            blob_path = f"sessions/{session_id}/recording-{timestamp}-{unique_id}{ext}"
+        else:
+            blob_path = f"recordings/recording-{timestamp}-{unique_id}{ext}"
+
+        # Upload to GCS
+        bucket = gcs_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_path)
+
+        # Set content type
+        content_type = audio.content_type or "audio/webm"
+        blob.upload_from_string(content, content_type=content_type)
+
+        gcs_uri = f"gs://{GCS_BUCKET_NAME}/{blob_path}"
+        public_url = f"https://storage.googleapis.com/{GCS_BUCKET_NAME}/{blob_path}"
+
+        print(f"✅ Audio uploaded to GCS: {gcs_uri}")
+
+        return {
+            "success": True,
+            "gcs_uri": gcs_uri,
+            "public_url": public_url,
+            "filename": blob_path,
+            "size_bytes": len(content)
+        }
+
+    except Exception as e:
+        print(f"❌ Audio upload error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Audio upload failed: {str(e)}")
 
 
 # ============================================================================
