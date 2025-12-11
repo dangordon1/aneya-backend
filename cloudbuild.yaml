@@ -1,0 +1,46 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--platform=linux/amd64'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/aneya/aneya-backend:$COMMIT_SHA'
+      - '-t'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/aneya/aneya-backend:latest'
+      - '.'
+
+  # Push the image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/aneya/aneya-backend:$COMMIT_SHA'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'asia-south1-docker.pkg.dev/$PROJECT_ID/aneya/aneya-backend:latest'
+
+  # Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'aneya-backend'
+      - '--image=asia-south1-docker.pkg.dev/$PROJECT_ID/aneya/aneya-backend:$COMMIT_SHA'
+      - '--region=asia-south1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--port=8080'
+      - '--memory=1Gi'
+      - '--cpu=1'
+      - '--min-instances=0'
+      - '--max-instances=10'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+images:
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/aneya/aneya-backend:$COMMIT_SHA'
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/aneya/aneya-backend:latest'
