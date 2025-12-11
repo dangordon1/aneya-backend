@@ -734,6 +734,33 @@ async def get_transcription_token():
         raise HTTPException(status_code=500, detail=f"Token generation failed: {str(e)}")
 
 
+@app.get("/api/get-sarvam-token")
+async def get_sarvam_token():
+    """
+    Return the Sarvam API key for WebSocket connection (Indian languages)
+
+    Sarvam AI is used for Indian language transcription and translation.
+    The API key is passed as a query parameter to the WebSocket endpoint.
+
+    Returns:
+        JSON with API key for WebSocket authentication
+    """
+    sarvam_key = os.getenv("SARVAM_API_KEY")
+    if not sarvam_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Sarvam transcription service not configured. SARVAM_API_KEY is required."
+        )
+
+    print("🔑 Providing Sarvam API key for Indian language transcription")
+
+    return {
+        "api_key": sarvam_key,
+        "model": "saaras:v2",
+        "provider": "sarvam"
+    }
+
+
 @app.post("/api/diarize")
 async def diarize_audio(
     audio: UploadFile = File(...),
@@ -925,6 +952,166 @@ async def diarize_audio(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Diarization failed: {str(e)}")
+
+
+@app.post("/api/diarize-sarvam")
+async def diarize_audio_sarvam(
+    audio: UploadFile = File(...),
+    num_speakers: int = 2
+):
+    """
+    Perform speaker diarization on audio using Sarvam AI Batch API
+
+    This endpoint uses Sarvam's speech-to-text-translate batch API with diarization
+    for Indian language consultations. Returns diarized transcript with speaker labels
+    and automatic English translation.
+
+    Args:
+        audio: Audio file (webm, wav, mp3, etc.)
+        num_speakers: Expected number of speakers (default 2 for doctor-patient)
+
+    Returns:
+        {
+            "success": true,
+            "segments": [{"speaker_id": "speaker 1", "text": "...", "start_time": 0.0, "end_time": 1.5}],
+            "detected_speakers": ["speaker 1", "speaker 2"],
+            "full_transcript": "complete translated text in English"
+        }
+    """
+    from sarvamai import SarvamAI
+
+    sarvam_key = os.getenv("SARVAM_API_KEY")
+    if not sarvam_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Sarvam diarization service not configured. SARVAM_API_KEY is required."
+        )
+
+    try:
+        print(f"🎤 Sarvam diarization for: {audio.filename}")
+
+        # Read audio content
+        content = await audio.read()
+        audio_size_kb = len(content) / 1024
+        print(f"📊 Audio file size: {audio_size_kb:.2f} KB")
+
+        # Save to temporary file for conversion
+        import subprocess
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp_file:
+            temp_file.write(content)
+            webm_path = temp_file.name
+
+        # Convert to mp3 for Sarvam (better compatibility)
+        mp3_path = webm_path.replace('.webm', '.mp3')
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-i', webm_path, '-acodec', 'libmp3lame', '-ab', '128k', mp3_path, '-y'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            if result.returncode != 0:
+                print(f"⚠️  FFmpeg conversion failed, using webm")
+                temp_path = webm_path
+            else:
+                print(f"✅ Converted to mp3")
+                os.unlink(webm_path)
+                temp_path = mp3_path
+        except Exception as e:
+            print(f"⚠️  Conversion error: {e}")
+            temp_path = webm_path
+
+        try:
+            start = time.time()
+
+            # Initialize Sarvam client
+            client = SarvamAI(api_subscription_key=sarvam_key)
+
+            # Create batch job with diarization
+            print(f"📤 Creating Sarvam batch job with diarization (speakers={num_speakers})...")
+            job = client.speech_to_text_translate_job.create_job(
+                model="saaras:v2.5",
+                with_diarization=True,
+                num_speakers=num_speakers
+            )
+
+            job_id = job.job_id
+            print(f"📋 Job created: {job_id}")
+
+            # Upload audio file
+            print(f"📤 Uploading audio file: {temp_path}")
+            upload_success = job.upload_files([temp_path], timeout=60.0)
+            if not upload_success:
+                raise Exception("Failed to upload audio file to Sarvam")
+            print(f"✅ Audio file uploaded")
+
+            # Start the job
+            print(f"▶️  Starting job...")
+            job.start()
+
+            # Wait for job completion (uses SDK's built-in polling)
+            print(f"⏳ Waiting for job completion...")
+            job.wait_until_complete(poll_interval=3, timeout=120)
+
+            latency = time.time() - start
+            print(f"✅ Job completed after {latency:.1f}s")
+
+            # Get results
+            results = job.get_file_results()
+            print(f"📥 Got results: {results}")
+
+            # Extract diarized transcript from results
+            full_transcript = ""
+            diarized = []
+
+            if results and 'successful' in results:
+                for file_result in results['successful']:
+                    print(f"📄 File result keys: {file_result.keys() if isinstance(file_result, dict) else type(file_result)}")
+                    print(f"📄 File result: {file_result}")
+                    if 'transcript' in file_result:
+                        full_transcript = file_result.get('transcript', '')
+                    if 'diarized_transcript' in file_result:
+                        diarized = file_result.get('diarized_transcript', [])
+
+            # Convert Sarvam format to our standard format
+            segments = []
+            detected_speakers = set()
+
+            if diarized:
+                for entry in diarized:
+                    speaker = entry.get('speaker', 'speaker 1')
+                    detected_speakers.add(speaker)
+                    segments.append({
+                        'speaker_id': speaker,
+                        'text': entry.get('text', ''),
+                        'start_time': entry.get('start', 0.0),
+                        'end_time': entry.get('end', 0.0)
+                    })
+
+            print(f"✅ Sarvam diarization complete in {latency:.2f}s")
+            print(f"👥 Detected {len(detected_speakers)} speakers")
+            print(f"📝 Generated {len(segments)} speaker segments")
+
+            return {
+                'success': True,
+                'segments': segments,
+                'detected_speakers': sorted(list(detected_speakers)) or ['speaker 1', 'speaker 2'],
+                'full_transcript': full_transcript,
+                'latency_seconds': round(latency, 2),
+                'model': 'sarvam/saaras:v2.5'
+            }
+
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    except Exception as e:
+        print(f"❌ Sarvam diarization error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Sarvam diarization failed: {str(e)}")
 
 
 @app.post("/api/transcribe")
