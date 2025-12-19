@@ -39,7 +39,10 @@ class ConsultationSummary:
     async def summarize(
         self,
         transcript: str,
-        patient_info: Optional[dict] = None
+        patient_info: Optional[dict] = None,
+        output_in_english: bool = False,
+        is_from_transcription: bool = True,
+        transcription_language: Optional[str] = None
     ) -> dict:
         """
         Generate a comprehensive summary of a consultation transcript.
@@ -47,6 +50,11 @@ class ConsultationSummary:
         Args:
             transcript: Diarized consultation transcript (format: "[timestamp] speaker_X: text")
             patient_info: Optional patient metadata (name, id, age, etc.)
+            output_in_english: If True, instruct Claude to output the summary in English
+                              (useful when transcript is in a non-English language)
+            is_from_transcription: If True, indicates this text came from speech-to-text
+                                   and may contain transcription errors
+            transcription_language: Original language of the transcription (e.g., 'hi-IN', 'en-US')
 
         Returns:
             Dictionary containing:
@@ -68,7 +76,10 @@ class ConsultationSummary:
             transcript=transcript,
             parsed_data=parsed,
             speaker_roles=speaker_roles,
-            patient_info=patient_info
+            patient_info=patient_info,
+            output_in_english=output_in_english,
+            is_from_transcription=is_from_transcription,
+            transcription_language=transcription_language
         )
 
         return summary
@@ -219,7 +230,10 @@ class ConsultationSummary:
         transcript: str,
         parsed_data: dict,
         speaker_roles: dict,
-        patient_info: Optional[dict]
+        patient_info: Optional[dict],
+        output_in_english: bool = False,
+        is_from_transcription: bool = True,
+        transcription_language: Optional[str] = None
     ) -> dict:
         """
         Generate comprehensive clinical summary using Claude.
@@ -229,6 +243,9 @@ class ConsultationSummary:
             parsed_data: Parsed conversation structure
             speaker_roles: Doctor/patient speaker mapping
             patient_info: Optional patient metadata
+            output_in_english: If True, instruct Claude to output in English
+            is_from_transcription: If True, indicates text came from speech-to-text
+            transcription_language: Original language of the transcription
 
         Returns:
             Comprehensive summary with all structured components
@@ -238,7 +255,10 @@ class ConsultationSummary:
             transcript=transcript,
             speaker_roles=speaker_roles,
             duration=parsed_data['duration_seconds'],
-            patient_info=patient_info
+            patient_info=patient_info,
+            output_in_english=output_in_english,
+            is_from_transcription=is_from_transcription,
+            transcription_language=transcription_language
         )
 
         # Call Claude with JSON mode for structured output
@@ -304,10 +324,22 @@ class ConsultationSummary:
         transcript: str,
         speaker_roles: dict,
         duration: float,
-        patient_info: Optional[dict]
+        patient_info: Optional[dict],
+        output_in_english: bool = False,
+        is_from_transcription: bool = True,
+        transcription_language: Optional[str] = None
     ) -> str:
         """
         Build the specialized prompt for medical consultation summarization.
+
+        Args:
+            transcript: The consultation transcript text
+            speaker_roles: Mapping of speaker IDs to roles
+            duration: Duration of the consultation in seconds
+            patient_info: Optional patient metadata
+            output_in_english: If True, add instruction to output in English
+            is_from_transcription: If True, indicates text came from speech-to-text
+            transcription_language: Original language of the transcription
 
         Returns:
             Prompt string for Claude
@@ -323,7 +355,41 @@ class ConsultationSummary:
             if patient_info.get('allergies'):
                 patient_context += f"- Known Allergies: {patient_info['allergies']}\n"
 
-        prompt = f"""You are a medical transcription documentation tool that converts diarized consultation transcripts into structured clinical reports.
+        # Add English output instruction if needed
+        language_instruction = ""
+        if output_in_english:
+            language_instruction = """
+
+IMPORTANT LANGUAGE INSTRUCTION:
+The transcript below is in a non-English language. You MUST output ALL text in the JSON response in ENGLISH.
+- Translate all content to English while preserving medical accuracy
+- Use standard English medical terminology
+- Maintain the meaning and clinical significance of all statements
+- All JSON field values must be in English
+"""
+
+        # Add transcription error handling instruction
+        transcription_instruction = ""
+        if is_from_transcription:
+            lang_note = ""
+            if transcription_language:
+                lang_note = f" The original language was {transcription_language}."
+            transcription_instruction = f"""
+
+IMPORTANT - TRANSCRIPTION SOURCE:
+This text was generated from speech-to-text transcription and may contain errors.{lang_note}
+When interpreting the transcript:
+- Be aware that some words may be incorrectly transcribed due to homophones (words that sound alike but have different meanings)
+- Medical terms, drug names, and numbers are especially prone to transcription errors
+- Consider phonetically similar alternatives when something doesn't make medical sense
+- For example: "paracetamol" might appear as "pair acetamol", "blood pressure" as "blood presher", "fever" as "fevers"
+- Names of medications may be misspelled or phonetically represented
+- Numbers and dosages may be transcribed incorrectly (e.g., "fifty" as "15", "two hundred" as "200")
+- Use your medical knowledge to infer the most likely intended meaning when transcription errors are apparent
+- If a word or phrase doesn't make sense in context, consider what similar-sounding word would be medically appropriate
+"""
+
+        prompt = f"""You are a medical transcription documentation tool that converts diarized consultation transcripts into structured clinical reports.{language_instruction}{transcription_instruction}
 
 CRITICAL INSTRUCTIONS:
 - Extract ONLY information explicitly stated in the transcript below

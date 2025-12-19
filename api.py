@@ -135,6 +135,8 @@ app.add_middleware(
         "http://localhost:5176",  # Local development (alternative port)
         "http://localhost:3000",
         "https://aneya.vercel.app",  # Production frontend
+        "https://aneya.health",  # Custom domain
+        "https://www.aneya.health",  # Custom domain with www
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -660,7 +662,9 @@ async def summarize_text(request: dict):
                 "patient_id": "P001",
                 "patient_age": "30 years old",
                 "allergies": "None"
-            }
+            },
+            "is_from_transcription": true,  # Default true - enables transcription error handling
+            "transcription_language": "en"  # Optional - language of original speech for homophone handling
         }
 
     Returns:
@@ -681,6 +685,8 @@ async def summarize_text(request: dict):
         raise HTTPException(status_code=400, detail="Text is required")
 
     patient_info = request.get("patient_info")
+    is_from_transcription = request.get("is_from_transcription", True)  # Default True for voice consultations
+    transcription_language = request.get("transcription_language")  # Language of original transcription
 
     try:
         # Determine which transcript to use for summarization
@@ -704,7 +710,9 @@ async def summarize_text(request: dict):
         result = await consultation_summary.summarize(
             transcript=transcript_for_summary,
             patient_info=patient_info,
-            output_in_english=has_original  # Tell Claude to output in English if input is non-English
+            output_in_english=has_original,  # Tell Claude to output in English if input is non-English
+            is_from_transcription=is_from_transcription,  # Flag for transcription error handling
+            transcription_language=transcription_language  # Language of original speech
         )
 
         print(f"\n{'='*70}")

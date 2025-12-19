@@ -315,6 +315,195 @@ class ClinicalDecisionSupportClient:
 
         return result
 
+    async def get_diagnoses(
+        self,
+        clinical_scenario: str,
+        patient_id: Optional[str] = None,
+        patient_name: Optional[str] = None,
+        patient_age: Optional[str] = None,
+        patient_sex: Optional[str] = None,
+        patient_height: Optional[str] = None,
+        patient_weight: Optional[str] = None,
+        current_medications: Optional[str] = None,
+        current_conditions: Optional[str] = None,
+        allergies: Optional[str] = None,
+        location_override: Optional[str] = None,
+        verbose: bool = True,
+        progress_callback: Optional[Callable] = None,
+        max_drugs: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Phase 1: Get diagnoses without drug lookups.
+
+        Returns diagnoses immediately so they can be sent to the client,
+        along with the list of drugs to look up in phase 2.
+        """
+        # Step 0: Validate input
+        if verbose:
+            print("\n" + "="*70)
+            print("CLINICAL DECISION SUPPORT - PHASE 1: DIAGNOSES")
+            print("="*70)
+            print(f"Consultation: {clinical_scenario[:100]}...")
+
+        is_valid, error_message = await self.diagnosis_engine.validate_clinical_input(
+            clinical_scenario, verbose=verbose
+        )
+
+        if not is_valid:
+            return {
+                'error': 'invalid_input',
+                'error_message': error_message,
+                'diagnoses': [],
+                'drugs_to_lookup': [],
+                'patient_context': {}
+            }
+
+        # Step 1: Analyze with guidelines
+        if verbose:
+            print(f"\nStep 1: Analyzing with guideline tools...")
+
+        diagnoses, tool_calls = await self.diagnosis_engine.analyze_with_guidelines(
+            clinical_scenario, verbose=verbose
+        )
+
+        # Emit tool_call events for progress
+        for tool_call in tool_calls:
+            if progress_callback:
+                await progress_callback("tool_call", tool_call)
+
+        if verbose:
+            print(f"   Extracted {len(diagnoses)} diagnoses")
+
+        # Step 1.5: PubMed fallback if needed
+        MIN_DIAGNOSES_THRESHOLD = 1
+
+        if len(diagnoses) < MIN_DIAGNOSES_THRESHOLD:
+            if verbose:
+                print(f"\nStep 1.5: PubMed fallback (only {len(diagnoses)} diagnoses)...")
+
+            diagnoses, pubmed_tool_calls = await self.diagnosis_engine.pubmed_fallback(
+                clinical_scenario, diagnoses, verbose=verbose
+            )
+
+            for tool_call in pubmed_tool_calls:
+                if progress_callback:
+                    await progress_callback("tool_call", tool_call)
+
+        # Step 2: Extract drugs from diagnoses
+        all_drugs = self._extract_drugs_from_diagnoses(diagnoses)
+        drugs_to_lookup = all_drugs[:max_drugs]
+
+        print(f"[DEBUG] Phase 1 complete: {len(diagnoses)} diagnoses, {len(drugs_to_lookup)} drugs to lookup")
+
+        # Build patient context for drug personalization
+        patient_context = {
+            'clinical_scenario': clinical_scenario,
+            'patient_name': patient_name or 'Not specified',
+            'patient_age': patient_age or 'Not specified',
+            'patient_sex': patient_sex or 'Not specified',
+            'patient_height': patient_height or 'Not specified',
+            'patient_weight': patient_weight or 'Not specified',
+            'current_medications': current_medications or 'None reported',
+            'current_conditions': current_conditions or 'None reported',
+            'allergies': allergies or 'None known',
+            'diagnosis': diagnoses[0].get('diagnosis', '') if diagnoses else ''
+        }
+
+        return {
+            'diagnoses': diagnoses,
+            'drugs_to_lookup': drugs_to_lookup,
+            'patient_context': patient_context
+        }
+
+    async def stream_drug_lookups(
+        self,
+        drugs_to_lookup: List[dict],
+        patient_context: dict,
+        verbose: bool = True
+    ):
+        """
+        Phase 2: Stream drug lookups as an async generator.
+
+        Yields drug_update events as each drug lookup completes,
+        allowing the API to stream them to the client in real-time.
+        """
+        if not drugs_to_lookup:
+            return
+
+        if verbose:
+            print(f"\n[DrugLookup] Streaming {len(drugs_to_lookup)} drug lookups...")
+
+        from .drug_info_retriever import get_bnf_index, fetch_bnf_drug_info
+        index = get_bnf_index()
+
+        for drug_obj in drugs_to_lookup:
+            drug_name = drug_obj.get('drug_name', '')
+            if not drug_name:
+                continue
+
+            try:
+                # Step 1: Search local index for slug
+                matches = index.search(drug_name, limit=1)
+
+                if not matches:
+                    if verbose:
+                        print(f"   [DrugLookup] {drug_name}: Not in BNF index")
+                    yield {
+                        'drug_name': drug_name,
+                        'status': 'failed',
+                        'error': f'Drug "{drug_name}" not found in BNF index'
+                    }
+                    continue
+
+                slug = matches[0]['slug']
+                matched_name = matches[0]['name']
+
+                if verbose:
+                    print(f"   [DrugLookup] {drug_name} -> {matched_name}")
+
+                # Step 2: Fetch raw BNF data directly
+                drug_url = f"https://bnf.nice.org.uk/drugs/{slug}/"
+                if verbose:
+                    print(f"   [DrugLookup] Fetching BNF data for {slug}...")
+
+                bnf_data = fetch_bnf_drug_info(drug_url)
+
+                if not bnf_data.get('success'):
+                    yield {
+                        'drug_name': drug_name,
+                        'status': 'failed',
+                        'error': bnf_data.get('error', 'Failed to fetch BNF data')
+                    }
+                    continue
+
+                # Step 3: Personalize with Claude
+                if verbose:
+                    print(f"   [DrugLookup] Personalizing {matched_name} for patient...")
+
+                personalized_data = await self.drug_retriever._personalize_drug_for_patient(
+                    bnf_data, patient_context, verbose
+                )
+
+                yield {
+                    'drug_name': drug_name,
+                    'status': 'complete',
+                    'source': 'bnf',
+                    'details': {
+                        'drug_name': personalized_data.get('drug_name', matched_name),
+                        'url': bnf_data.get('url'),
+                        'bnf_data': personalized_data
+                    }
+                }
+
+            except Exception as e:
+                if verbose:
+                    print(f"   [DrugLookup] Error for {drug_name}: {e}")
+                yield {
+                    'drug_name': drug_name,
+                    'status': 'failed',
+                    'error': str(e)
+                }
+
     def _extract_drugs_from_diagnoses(self, diagnoses: List[dict]) -> List[dict]:
         """
         Extract all drug objects from diagnoses structure.
