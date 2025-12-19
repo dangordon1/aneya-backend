@@ -7,6 +7,7 @@ Wraps the Clinical Decision Support Client for the React frontend
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel
 from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
@@ -21,8 +22,26 @@ import time
 import asyncio
 import uuid
 from google.cloud import storage
+import firebase_admin
+from firebase_admin import credentials
+
 # Load environment variables from .env file
 load_dotenv()
+
+# Initialize Firebase Admin SDK (for password reset link generation)
+# Uses Application Default Credentials (ADC) when running on Cloud Run
+# Requires GOOGLE_CLOUD_PROJECT or explicit project ID
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "aneya-266ee")
+
+if not firebase_admin._apps:
+    try:
+        # Initialize with explicit project ID
+        firebase_admin.initialize_app(options={
+            'projectId': FIREBASE_PROJECT_ID
+        })
+        print(f"✅ Firebase Admin SDK initialized (project: {FIREBASE_PROJECT_ID})")
+    except Exception as e:
+        print(f"⚠️  Firebase Admin SDK initialization warning: {e}")
 
 # Add servers directory to path (servers is in the backend repo root)
 sys.path.insert(0, str(Path(__file__).parent / "servers"))
@@ -127,7 +146,13 @@ class AnalysisRequest(BaseModel):
     """Request body for consultation analysis"""
     consultation: str
     patient_id: Optional[str] = None
+    patient_name: Optional[str] = None
     patient_age: Optional[str] = None
+    patient_sex: Optional[str] = None
+    patient_height: Optional[str] = None
+    patient_weight: Optional[str] = None
+    current_medications: Optional[str] = None
+    current_conditions: Optional[str] = None
     allergies: Optional[str] = None
     user_ip: Optional[str] = None  # User's IP address for geolocation
     location_override: Optional[str] = None  # Optional manual country override
@@ -202,6 +227,45 @@ async def api_health_check():
         "status": "healthy",
         "message": "All systems operational"
     }
+
+
+@app.get("/api/geolocation")
+async def get_geolocation():
+    """
+    Get geolocation info including timezone based on the caller's IP address.
+    Uses ip-api.com for geolocation lookups.
+
+    Returns:
+        Dictionary with ip, country, country_code, timezone, city, region
+    """
+    try:
+        async with httpx.AsyncClient() as http_client:
+            # Get public IP
+            ip_response = await http_client.get('https://api.ipify.org?format=json', timeout=5.0)
+            ip_response.raise_for_status()
+            ip_address = ip_response.json()['ip']
+
+            # Get geolocation with timezone
+            geo_response = await http_client.get(
+                f'http://ip-api.com/json/{ip_address}?fields=status,message,country,countryCode,city,regionName,timezone',
+                timeout=5.0
+            )
+            geo_response.raise_for_status()
+            data = geo_response.json()
+
+            if data.get('status') == 'fail':
+                raise HTTPException(status_code=400, detail=f"Geolocation failed: {data.get('message', 'Unknown error')}")
+
+            return {
+                'ip': ip_address,
+                'country': data.get('country'),
+                'country_code': data.get('countryCode'),
+                'city': data.get('city'),
+                'region': data.get('regionName'),
+                'timezone': data.get('timezone')
+            }
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Geolocation service unavailable: {str(e)}")
 
 
 @app.post("/api/analyze")
@@ -325,16 +389,22 @@ async def analyze_consultation_stream(request: AnalysisRequest):
     if not request.consultation.strip():
         raise HTTPException(status_code=400, detail="Consultation text is required")
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        """Generate SSE events for progress updates"""
+    async def event_generator() -> AsyncGenerator[dict, None]:
+        """Generate SSE events for progress updates using sse-starlette"""
         try:
-            # Helper to send SSE event
-            def send_event(event_type: str, data: dict):
-                return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+            # Helper to send SSE event - uses dict format for sse-starlette
+            def send_event(event_type: str, data: dict) -> dict:
+                return {"event": event_type, "data": json.dumps(data)}
 
-            # Normalize input
+            # Normalize input - extract all patient details
             patient_id = request.patient_id if request.patient_id and request.patient_id.strip() else None
+            patient_name = request.patient_name if request.patient_name and request.patient_name.strip() else None
             patient_age = request.patient_age if request.patient_age and request.patient_age.strip() else None
+            patient_sex = request.patient_sex if request.patient_sex and request.patient_sex.strip() else None
+            patient_height = request.patient_height if request.patient_height and request.patient_height.strip() else None
+            patient_weight = request.patient_weight if request.patient_weight and request.patient_weight.strip() else None
+            current_medications = request.current_medications if request.current_medications and request.current_medications.strip() else None
+            current_conditions = request.current_conditions if request.current_conditions and request.current_conditions.strip() else None
             allergies = request.allergies if request.allergies and request.allergies.strip() else None
 
             # Send start event
@@ -372,93 +442,72 @@ async def analyze_consultation_stream(request: AnalysisRequest):
             # Step 4: Run analysis
             yield send_event("progress", {"step": "analyzing", "message": "Analyzing consultation with AI..."})
 
-            # Create a queue to collect events from the progress callback
-            event_queue = asyncio.Queue()
+            # Two-phase streaming approach:
+            # Phase 1: Get diagnoses (blocking ~60s) - yields immediately when done
+            # Phase 2: Stream drug lookups - yields each drug_update as it completes
 
-            # Progress callback to emit events in real-time
-            async def progress_callback(event_type: str, data: dict):
-                """Called by clinical_decision_support during analysis"""
-                await event_queue.put((event_type, data))
+            print(f"[API] Phase 1: Getting diagnoses...", flush=True)
 
-            # Run the main analysis in background and stream events
-            analysis_task = asyncio.create_task(
-                client.clinical_decision_support(
-                    clinical_scenario=request.consultation,
-                    patient_id=patient_id,
-                    patient_age=patient_age,
-                    allergies=allergies,
-                    location_override=location_to_use,
-                    verbose=False,
-                    progress_callback=progress_callback
-                )
+            # Phase 1: Get diagnoses (blocking call is fine - we stream result immediately after)
+            diagnosis_result = await client.get_diagnoses(
+                clinical_scenario=request.consultation,
+                patient_id=patient_id,
+                patient_name=patient_name,
+                patient_age=patient_age,
+                patient_sex=patient_sex,
+                patient_height=patient_height,
+                patient_weight=patient_weight,
+                current_medications=current_medications,
+                current_conditions=current_conditions,
+                allergies=allergies,
+                location_override=location_to_use,
+                verbose=False
             )
 
-            # Stream events as they come from the analysis
-            result = None
-            events_processed = 0
+            # Check for validation error
+            if diagnosis_result.get('error') == 'invalid_input':
+                yield send_event("error", {
+                    "type": "invalid_input",
+                    "message": diagnosis_result.get('error_message', 'Invalid input')
+                })
+                return
 
-            # Helper to process a single event
-            def process_event(event_type: str, data: dict):
-                nonlocal events_processed
-                events_processed += 1
-                print(f"[API] Processing event #{events_processed}: {event_type}", flush=True)
+            diagnoses = diagnosis_result.get('diagnoses', [])
+            drugs_to_lookup = diagnosis_result.get('drugs_to_lookup', [])
+            patient_context = diagnosis_result.get('patient_context', {})
 
-                if event_type == "tool_call":
-                    tool_name = data.get("tool_name", "")
-                    if "search" in tool_name.lower() or "nice" in tool_name.lower() or "bnf" in tool_name.lower():
-                        return send_event("guideline_search", {
-                            "source": tool_name,
-                            "query": data.get("tool_input", {})
-                        })
-                elif event_type == "bnf_drug":
-                    return send_event("bnf_drug", data)
-                elif event_type == "drug_update":
-                    print(f"[API] Sending drug_update: {data.get('drug_name')} - {data.get('status')}", flush=True)
-                    return send_event("drug_update", data)
-                elif event_type == "diagnoses":
-                    return send_event("diagnoses", data)
-                return None
+            # Emit diagnoses event with pending drugs - this goes to client IMMEDIATELY
+            drugs_pending = [d['drug_name'] for d in drugs_to_lookup]
+            import time
+            print(f"[API] [{time.time():.3f}] Sending diagnoses event with {len(diagnoses)} diagnoses, {len(drugs_pending)} pending drugs", flush=True)
+            yield send_event("diagnoses", {
+                "diagnoses": diagnoses,
+                "drugs_pending": drugs_pending
+            })
+            await asyncio.sleep(0)  # Force event loop to flush diagnoses event
 
-            while True:
-                try:
-                    # Check if analysis is done
-                    if analysis_task.done():
-                        print(f"[API] Analysis task completed, draining event queue...", flush=True)
-                        result = analysis_task.result()
+            print(f"[API] [{time.time():.3f}] Phase 2: Streaming drug lookups for {len(drugs_to_lookup)} drugs...", flush=True)
 
-                        # Drain remaining events with a small delay to ensure queue is populated
-                        await asyncio.sleep(0.1)
+            # Phase 2: Stream drug lookups - each drug_update is yielded as it completes
+            drug_results = []
+            async for drug_update in client.stream_drug_lookups(drugs_to_lookup, patient_context):
+                print(f"[API] [{time.time():.3f}] Streaming drug_update: {drug_update.get('drug_name')} - {drug_update.get('status')}", flush=True)
+                yield send_event("drug_update", drug_update)
+                await asyncio.sleep(0)  # Force event loop to flush
+                drug_results.append(drug_update)
 
-                        drain_count = 0
-                        while True:
-                            try:
-                                # Use wait_for with short timeout instead of empty() check
-                                event_type, data = await asyncio.wait_for(event_queue.get(), timeout=0.5)
-                                drain_count += 1
-                                sse_event = process_event(event_type, data)
-                                if sse_event:
-                                    yield sse_event
-                            except asyncio.TimeoutError:
-                                # Queue is truly empty
-                                print(f"[API] Queue drained: {drain_count} events", flush=True)
-                                break
-                        break
+            # Build final result
+            result = {
+                'diagnoses': diagnoses,
+                'bnf_prescribing_guidance': [],  # Populated from drug_results
+                'guidelines_searched': [],  # Tool calls collected during diagnosis
+                'summary': client._generate_summary(diagnoses)
+            }
 
-                    # Wait for next event with timeout
-                    try:
-                        event_type, data = await asyncio.wait_for(event_queue.get(), timeout=0.1)
-                        sse_event = process_event(event_type, data)
-                        if sse_event:
-                            yield sse_event
-                    except asyncio.TimeoutError:
-                        # No events, continue waiting for analysis
-                        continue
-
-                except Exception as e:
-                    print(f"[API] Error processing event: {e}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-                    break
+            # Add successful drug details to result
+            for drug_result in drug_results:
+                if drug_result.get('status') == 'complete' and drug_result.get('details'):
+                    result['bnf_prescribing_guidance'].append(drug_result['details'])
 
             # Check for invalid input error
             if result and result.get('error') == 'invalid_input':
@@ -475,13 +524,33 @@ async def analyze_consultation_stream(request: AnalysisRequest):
         except Exception as e:
             yield send_event("error", {"message": str(e)})
 
-    return StreamingResponse(
+    # Use EventSourceResponse from sse-starlette for proper SSE flushing
+    # ping=15 sends ping every 15 seconds to keep connection alive
+    # send_timeout=0.1 ensures events are sent immediately
+    return EventSourceResponse(
         event_generator(),
-        media_type="text/event-stream",
+        ping=15,
+        send_timeout=0.1,
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no"  # Disable nginx buffering
         }
+    )
+
+
+@app.get("/api/test-sse")
+async def test_sse():
+    """Simple SSE test endpoint - yields events with 2 second delays"""
+    async def event_generator():
+        import asyncio
+        for i in range(5):
+            yield {"event": "message", "data": json.dumps({"count": i, "message": f"Event {i}"})}
+            await asyncio.sleep(2)
+        yield {"event": "done", "data": json.dumps({"message": "Complete"})}
+
+    return EventSourceResponse(
+        event_generator(),
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
 
 
@@ -586,6 +655,7 @@ async def summarize_text(request: dict):
     Args:
         request: {
             "text": "diarized transcript with [timestamp] speaker_X: format",
+            "original_text": "original language transcript (optional)",
             "patient_info": {  # Optional
                 "patient_id": "P001",
                 "patient_age": "30 years old",
@@ -606,24 +676,35 @@ async def summarize_text(request: dict):
         raise HTTPException(status_code=503, detail="Consultation summary system not initialized")
 
     text = request.get("text", "").strip()
-    if not text:
+    original_text = request.get("original_text", "").strip()
+    if not text and not original_text:
         raise HTTPException(status_code=400, detail="Text is required")
 
     patient_info = request.get("patient_info")
 
     try:
+        # Determine which transcript to use for summarization
+        # Prefer original language transcript if provided - Claude handles non-English better than translation
+        transcript_for_summary = original_text if original_text else text
+        has_original = bool(original_text and original_text != text)
+
         print(f"\n{'='*70}")
         print(f"📝 SUMMARIZING CONSULTATION")
         print(f"{'='*70}")
-        print(f"Transcript length: {len(text)} characters")
+        print(f"Translated transcript length: {len(text)} characters")
+        if has_original:
+            print(f"Original transcript length: {len(original_text)} characters")
+            print(f"Using ORIGINAL language transcript for summarization (Claude will output in English)")
         if patient_info:
             print(f"Patient info provided: {list(patient_info.keys())}")
         print(f"{'='*70}\n")
 
         # Generate comprehensive summary
+        # Pass the original transcript and a flag to tell Claude to output in English
         result = await consultation_summary.summarize(
-            transcript=text,
-            patient_info=patient_info
+            transcript=transcript_for_summary,
+            patient_info=patient_info,
+            output_in_english=has_original  # Tell Claude to output in English if input is non-English
         )
 
         print(f"\n{'='*70}")
@@ -649,7 +730,8 @@ async def summarize_text(request: dict):
         consultation_data = {
             # Transcript data
             "consultation_text": simple_summary,  # Summary text for display
-            "original_transcript": text,  # Original transcript
+            "original_transcript": original_text if original_text else text,  # Original language transcript
+            "translated_transcript": text if has_original else None,  # English translation (if different from original)
             "transcription_language": result.get('detected_language'),
 
             # Patient snapshot - to be filled by frontend with patient details
@@ -1271,6 +1353,336 @@ async def upload_audio_to_gcs(
 
 
 # ============================================================================
+# EMAIL INVITATION ENDPOINTS
+# ============================================================================
+
+class SendInvitationEmailRequest(BaseModel):
+    """Request body for sending patient invitation emails"""
+    email: str
+    patient_name: Optional[str] = None
+    doctor_name: str
+    invitation_token: str
+    invitation_url: Optional[str] = None  # Full URL to accept invitation
+
+
+class PasswordResetRequest(BaseModel):
+    """Request body for password reset"""
+    email: str
+
+
+@app.post("/api/send-invitation-email")
+async def send_invitation_email(request: SendInvitationEmailRequest):
+    """
+    Send a patient invitation email using Resend
+
+    Args:
+        request: SendInvitationEmailRequest with email, names, and invitation token
+
+    Returns:
+        {
+            "success": true,
+            "message_id": "resend-message-id",
+            "recipient": "email@example.com"
+        }
+    """
+    import resend
+
+    resend_api_key = os.getenv("RESEND_API_KEY")
+    if not resend_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Email service not configured. RESEND_API_KEY is required."
+        )
+
+    resend.api_key = resend_api_key
+
+    try:
+        # Build the invitation URL
+        base_url = request.invitation_url or f"https://aneya.vercel.app/join?token={request.invitation_token}"
+
+        # Personalize greeting
+        greeting = f"Hi {request.patient_name}," if request.patient_name else "Hello,"
+
+        # Build HTML email
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 40px 20px; }}
+        .header {{ text-align: center; margin-bottom: 30px; }}
+        .logo {{ font-family: Georgia, serif; font-size: 32px; color: #0c3555; font-weight: bold; }}
+        .content {{ background: #f6f5ee; border-radius: 12px; padding: 30px; margin-bottom: 30px; }}
+        .button {{ display: inline-block; background: #1d9e99; color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: 600; margin: 20px 0; }}
+        .button:hover {{ background: #178a85; }}
+        .footer {{ text-align: center; color: #666; font-size: 14px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo">aneya</div>
+        </div>
+        <div class="content">
+            <p>{greeting}</p>
+            <p><strong>Dr. {request.doctor_name}</strong> has invited you to connect on Aneya, a secure healthcare platform for managing your appointments and health records.</p>
+            <p>Click the button below to accept this invitation and create your account:</p>
+            <p style="text-align: center;">
+                <a href="{base_url}" class="button">Accept Invitation</a>
+            </p>
+            <p style="font-size: 14px; color: #666;">This invitation link will expire in 7 days. If you didn't expect this invitation, you can safely ignore this email.</p>
+        </div>
+        <div class="footer">
+            <p>Aneya - Clinical Decision Support</p>
+            <p style="font-size: 12px;">This email was sent to {request.email}</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        # Send email via Resend
+        print(f"📧 Sending invitation email to {request.email}...")
+
+        params = {
+            "from": "Aneya <onboarding@resend.dev>",
+            "to": [request.email],
+            "subject": f"You've been invited to connect with Dr. {request.doctor_name} on Aneya",
+            "html": html_content,
+        }
+
+        email_response = resend.Emails.send(params)
+
+        print(f"✅ Invitation email sent to {request.email}")
+        print(f"   Message ID: {email_response.get('id', 'N/A')}")
+
+        return {
+            "success": True,
+            "message_id": email_response.get("id"),
+            "recipient": request.email
+        }
+
+    except Exception as e:
+        print(f"❌ Email sending error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to send invitation email: {str(e)}")
+
+
+@app.post("/api/send-password-reset-email")
+async def send_password_reset_email(request: PasswordResetRequest):
+    """
+    Send a password reset email using Resend with Firebase password reset link
+
+    This bypasses Firebase's default email sending which has poor deliverability.
+    Instead, we generate the reset link using Firebase Admin SDK and send it
+    via Resend from our custom domain (aneya.health).
+
+    Args:
+        request: PasswordResetRequest with email address
+
+    Returns:
+        {
+            "success": true,
+            "message": "Password reset email sent"
+        }
+    """
+    import resend
+    from firebase_admin import auth as firebase_auth
+
+    resend_api_key = os.getenv("RESEND_API_KEY")
+    if not resend_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Email service not configured. RESEND_API_KEY is required."
+        )
+
+    resend.api_key = resend_api_key
+
+    try:
+        email = request.email.strip().lower()
+
+        # Validate email format
+        if not email or '@' not in email:
+            raise HTTPException(status_code=400, detail="Invalid email address")
+
+        print(f"🔑 Processing password reset request for: {email}")
+
+        # Generate Firebase password reset link using Admin SDK
+        # This creates a secure link that Firebase will accept
+        try:
+            action_code_settings = firebase_auth.ActionCodeSettings(
+                url='https://aneya.vercel.app/login',  # Redirect after reset
+                handle_code_in_app=False,
+            )
+            reset_link = firebase_auth.generate_password_reset_link(
+                email,
+                action_code_settings=action_code_settings
+            )
+            print(f"✅ Generated Firebase reset link")
+        except firebase_auth.UserNotFoundError:
+            # Don't reveal if email exists or not (security best practice)
+            print(f"⚠️  User not found: {email} (returning success anyway)")
+            return {
+                "success": True,
+                "message": "If an account exists with this email, a password reset link has been sent."
+            }
+        except Exception as firebase_error:
+            print(f"❌ Firebase error generating reset link: {firebase_error}")
+            raise HTTPException(status_code=500, detail=f"Failed to generate reset link: {str(firebase_error)}")
+
+        # Build HTML email with aneya branding
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 0;
+            background-color: #f6f5ee;
+        }}
+        .container {{
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }}
+        .card {{
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }}
+        .header {{
+            text-align: center;
+            margin-bottom: 30px;
+        }}
+        .logo {{
+            font-family: Georgia, serif;
+            font-size: 32px;
+            color: #0c3555;
+            font-weight: bold;
+        }}
+        .content {{
+            margin-bottom: 30px;
+        }}
+        .button {{
+            display: inline-block;
+            background: #1d9e99;
+            color: white !important;
+            padding: 14px 32px;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            margin: 20px 0;
+        }}
+        .button:hover {{
+            background: #178a85;
+        }}
+        .footer {{
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }}
+        .warning {{
+            background: #fff8e6;
+            border: 1px solid #ffd666;
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 14px;
+            color: #8a6d3b;
+            margin-top: 20px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <div class="header">
+                <div class="logo">aneya</div>
+                <p style="color: #666; margin-top: 8px;">Clinical Decision Support</p>
+            </div>
+            <div class="content">
+                <h2 style="color: #0c3555; margin-bottom: 16px;">Reset Your Password</h2>
+                <p>We received a request to reset the password for your Aneya account associated with <strong>{email}</strong>.</p>
+                <p>Click the button below to set a new password:</p>
+                <p style="text-align: center;">
+                    <a href="{reset_link}" class="button">Reset Password</a>
+                </p>
+                <div class="warning">
+                    <strong>Didn't request this?</strong> If you didn't request a password reset, you can safely ignore this email. Your password will remain unchanged.
+                </div>
+            </div>
+            <div class="footer">
+                <p>This link will expire in 1 hour for security reasons.</p>
+                <p style="font-size: 12px; color: #999;">
+                    Aneya Healthcare Platform<br>
+                    This email was sent to {email}
+                </p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        # Plain text version for email clients that don't support HTML
+        text_content = f"""
+Reset Your Password - Aneya
+
+We received a request to reset the password for your Aneya account ({email}).
+
+Click the link below to set a new password:
+{reset_link}
+
+This link will expire in 1 hour for security reasons.
+
+If you didn't request this password reset, you can safely ignore this email.
+
+---
+Aneya Healthcare Platform
+"""
+
+        # Send email via Resend
+        print(f"📧 Sending password reset email to {email}...")
+
+        params = {
+            "from": "Aneya <noreply@aneya.health>",
+            "to": [email],
+            "subject": "Reset your Aneya password",
+            "html": html_content,
+            "text": text_content,
+        }
+
+        email_response = resend.Emails.send(params)
+
+        print(f"✅ Password reset email sent to {email}")
+        print(f"   Message ID: {email_response.get('id', 'N/A')}")
+
+        return {
+            "success": True,
+            "message": "If an account exists with this email, a password reset link has been sent."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Password reset email error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to send password reset email: {str(e)}")
+
+
+# ============================================================================
 # APPOINTMENTS ENDPOINTS
 # ============================================================================
 
@@ -1298,6 +1710,117 @@ async def update_appointment_status(
         "status": new_status,
         "message": "Appointment status updated (placeholder)"
     }
+
+
+# ============================================================================
+# SYMPTOM STRUCTURING ENDPOINT
+# ============================================================================
+
+class StructureSymptomRequest(BaseModel):
+    """Request body for symptom structuring"""
+    symptom_text: str
+    original_transcript: Optional[str] = None
+    transcription_language: Optional[str] = None
+    patient_id: str
+
+
+@app.post("/api/structure-symptom")
+async def structure_symptom(request: StructureSymptomRequest):
+    """
+    Use Claude to structure free-form symptom text into structured data,
+    then save to Supabase patient_symptoms table.
+    """
+    import anthropic
+    from supabase import create_client, Client
+
+    # Get Supabase credentials
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")  # Use service key for backend operations
+
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=500, detail="Supabase configuration not available")
+
+    # Initialize Supabase client
+    supabase: Client = create_client(supabase_url, supabase_key)
+
+    # Use Claude to structure the symptom text
+    anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+    prompt = f"""Analyze the following patient symptom description and extract structured information.
+Return a JSON object with these fields (use null if information is not provided):
+
+- severity: number from 1-10 (null if not mentioned)
+- duration: string describing how long they've had symptoms (null if not mentioned)
+- body_location: string describing where symptoms are felt (null if not mentioned)
+- time_of_day: string describing when symptoms are worst (null if not mentioned)
+- triggers: string describing possible triggers (null if not mentioned)
+- additional_notes: any other relevant clinical information not captured above (null if none)
+- structured_summary: a concise clinical summary of the symptoms (always provide this)
+
+Patient's symptom description:
+"{request.symptom_text}"
+
+Respond with ONLY the JSON object, no other text."""
+
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        # Parse the response
+        response_text = response.content[0].text.strip()
+
+        # Try to extract JSON from the response
+        import re
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            structured_data = json.loads(json_match.group())
+        else:
+            structured_data = json.loads(response_text)
+
+    except Exception as e:
+        print(f"Error structuring symptom with Claude: {e}")
+        # Fallback: use the raw text without structuring
+        structured_data = {
+            "severity": None,
+            "duration": None,
+            "body_location": None,
+            "time_of_day": None,
+            "triggers": None,
+            "additional_notes": None,
+            "structured_summary": request.symptom_text
+        }
+
+    # Save to Supabase
+    try:
+        # Prepare the data for insertion
+        symptom_data = {
+            "patient_id": request.patient_id,
+            "symptom_text": structured_data.get("structured_summary", request.symptom_text),
+            "original_transcript": request.original_transcript or request.symptom_text,
+            "transcription_language": request.transcription_language,
+            "severity": structured_data.get("severity"),
+            "duration_description": structured_data.get("duration"),
+            "body_location": structured_data.get("body_location"),
+            "notes": structured_data.get("additional_notes"),
+            "status": "active"
+        }
+
+        result = supabase.table("patient_symptoms").insert(symptom_data).execute()
+
+        return {
+            "success": True,
+            "structured_data": structured_data,
+            "symptom_id": result.data[0]["id"] if result.data else None
+        }
+
+    except Exception as e:
+        print(f"Error saving symptom to Supabase: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save symptom: {str(e)}")
 
 
 if __name__ == "__main__":

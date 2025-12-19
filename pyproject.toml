@@ -19,6 +19,7 @@ dependencies = [
     "pydantic>=2.12.4",
     "python-dotenv>=1.0.0",
     "requests>=2.32.5",
+    "resend>=2.0.0",
     "uvicorn>=0.38.0",
 ]
 
