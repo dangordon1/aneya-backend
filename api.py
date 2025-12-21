@@ -929,7 +929,7 @@ async def diarize_audio(
             start = time.time()
 
             # Call ElevenLabs Scribe v1 API with diarization
-            async with httpx.AsyncClient(timeout=60.0) as http_client:
+            async with httpx.AsyncClient(timeout=120.0) as http_client:
                 with open(temp_path, 'rb') as audio_file:
                     # Set correct MIME type based on file format
                     mime_type = 'audio/mpeg' if temp_path.endswith('.mp3') else 'audio/webm'
