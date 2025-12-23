@@ -4,7 +4,7 @@ Aneya API - FastAPI Backend
 Wraps the Clinical Decision Support Client for the React frontend
 """
 
-from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
@@ -1204,6 +1204,613 @@ async def diarize_audio_sarvam(
         raise HTTPException(status_code=500, detail=f"Sarvam diarization failed: {str(e)}")
 
 
+class SpeakerRoleRequest(BaseModel):
+    segments: list[dict]  # List of {speaker_id, text, start_time, end_time}
+    language: Optional[str] = "en-IN"
+
+
+@app.post("/api/identify-speaker-roles")
+async def identify_speaker_roles(request: SpeakerRoleRequest):
+    """
+    Identify which speaker is the doctor vs patient using LLM analysis
+
+    Analyzes the first chunk of conversation to determine speaker roles.
+    Uses Claude Haiku for fast, cost-effective inference.
+
+    Args:
+        segments: Diarized segments from the first chunk
+        language: Conversation language (for context)
+
+    Returns:
+        Speaker role mapping: {"speaker_0": "Doctor", "speaker_1": "Patient"}
+    """
+    try:
+        import anthropic
+
+        anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        # Format conversation for analysis
+        conversation_text = ""
+        for seg in request.segments[:20]:  # Use first 20 segments (enough context)
+            conversation_text += f"{seg['speaker_id']}: {seg['text']}\n"
+
+        print(f"🔍 Identifying speaker roles from {len(request.segments)} segments")
+
+        # Prompt for role identification
+        prompt = f"""You are analyzing a medical consultation conversation between a doctor and a patient.
+The conversation has been transcribed with speaker diarization, identifying speakers as "speaker_0" and "speaker_1".
+
+Your task: Determine which speaker is the DOCTOR and which is the PATIENT.
+
+Conversation transcript:
+{conversation_text}
+
+Analysis guidelines:
+- Doctors typically: ask diagnostic questions, use medical terminology, lead the consultation, give advice
+- Patients typically: describe symptoms, answer questions about their health, express concerns
+- Look at speech patterns, question types, and conversational dynamics
+
+Respond with ONLY a JSON object in this exact format (no other text):
+{{"speaker_0": "Doctor", "speaker_1": "Patient"}}
+OR
+{{"speaker_0": "Patient", "speaker_1": "Doctor"}}
+
+Your response:"""
+
+        # Call Claude Haiku for fast inference
+        start_time = time.time()
+
+        response = anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=100,
+            temperature=0,
+            messages=[{
+                "role": "user",
+                "content": prompt
+            }]
+        )
+
+        latency = time.time() - start_time
+
+        # Parse response
+        response_text = response.content[0].text.strip()
+
+        # Extract JSON (handle markdown code blocks if present)
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+
+        role_mapping = json.loads(response_text)
+
+        print(f"✅ Speaker roles identified in {latency:.2f}s: {role_mapping}")
+
+        return {
+            "success": True,
+            "role_mapping": role_mapping,
+            "latency_seconds": round(latency, 2),
+            "model": "claude-3-5-haiku-20241022"
+        }
+
+    except json.JSONDecodeError as e:
+        print(f"❌ Failed to parse LLM response: {response_text}")
+        # Fallback: default mapping
+        return {
+            "success": False,
+            "role_mapping": {"speaker_0": "Speaker 1", "speaker_1": "Speaker 2"},
+            "error": "Failed to parse LLM response",
+            "fallback": True
+        }
+    except Exception as e:
+        print(f"❌ Speaker role identification error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Speaker role identification failed: {str(e)}")
+
+
+@app.post("/api/diarize-chunk")
+async def diarize_audio_chunk(
+    audio: UploadFile = File(...),
+    chunk_index: int = Form(0),
+    chunk_start: float = Form(0.0),
+    chunk_end: float = Form(30.0),
+    num_speakers: Optional[int] = Form(None),
+    diarization_threshold: float = Form(0.22),
+    language: Optional[str] = Form(None)
+):
+    """
+    Diarize audio chunk with overlap metadata for speaker ID matching
+
+    This endpoint processes 30-second audio chunks during recording, enabling
+    real-time speaker-labeled transcription. Returns segments with overlap
+    statistics for cross-chunk speaker matching.
+
+    Args:
+        audio: Audio chunk file (webm, 30 seconds)
+        chunk_index: Chunk number (0, 1, 2, ...)
+        chunk_start: Start time in full recording (seconds)
+        chunk_end: End time in full recording (seconds)
+        num_speakers: Optional expected number of speakers
+        diarization_threshold: Speaker change detection threshold
+        language: Language code (e.g., "en-IN", "hi-IN")
+
+    Returns:
+        {
+            "success": true,
+            "chunk_index": 0,
+            "chunk_start": 0.0,
+            "chunk_end": 30.0,
+            "segments": [...],
+            "detected_speakers": ["speaker_0", "speaker_1"],
+            "start_overlap_stats": {...},
+            "end_overlap_stats": {...},
+            "latency_seconds": 2.3
+        }
+    """
+    print(f"🎬 Chunk {chunk_index}: Received {audio.filename} ({chunk_start:.1f}s-{chunk_end:.1f}s)")
+
+    # IMPORTANT: We use Sarvam for Indian languages despite the added complexity and slower processing
+    # Reason: ElevenLabs performs so poorly on Indian languages (Hindi, Tamil, Telugu, etc.) that
+    # it's completely unusable - transcriptions are inaccurate and speaker labels are wrong.
+    # Sarvam provides high-quality transcription and diarization for Indian languages, making the
+    # extra complexity (batch API, longer wait times, FFmpeg conversion) worthwhile for usability.
+    #
+    # Trade-off: Sarvam's batch API is slower (jobs can take 30-120s) vs ElevenLabs (5-10s),
+    # but accurate transcription is more valuable than speed for Indian language consultations.
+    use_sarvam = language and language in [
+        'en-IN', 'hi-IN', 'bn-IN', 'gu-IN', 'kn-IN', 'ml-IN',
+        'mr-IN', 'od-IN', 'pa-IN', 'ta-IN', 'te-IN'
+    ]
+
+    try:
+        # Read audio content
+        content = await audio.read()
+        audio_size_kb = len(content) / 1024
+        print(f"📦 Audio size: {audio_size_kb:.2f} KB")
+
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp_file:
+            temp_file.write(content)
+            webm_path = temp_file.name
+
+        # Convert to MP3 for Sarvam (required for reliability with Indian languages)
+        # ElevenLabs supports webm directly, but Sarvam works better with MP3
+        if use_sarvam:
+            mp3_path = webm_path.replace('.webm', '.mp3')
+            try:
+                import subprocess
+
+                # First, diagnose the WebM file with ffprobe
+                probe_result = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-show_format', '-show_streams', webm_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                print(f"🔍 WebM probe results:")
+                print(f"   codec info: {probe_result.stdout[:300]}")
+
+                # Add -vn flag to ignore video streams (WebM might have video metadata)
+                # Add -nostdin to prevent FFmpeg from reading stdin
+                result = subprocess.run(
+                    [
+                        'ffmpeg',
+                        '-i', webm_path,
+                        '-vn',  # Ignore video streams
+                        '-acodec', 'libmp3lame',
+                        '-ab', '128k',
+                        '-nostdin',  # Prevent FFmpeg from reading stdin
+                        '-y',  # Overwrite output
+                        mp3_path
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30  # Increased from 15s
+                )
+                if result.returncode == 0:
+                    temp_path = mp3_path
+                    os.unlink(webm_path)
+                    print(f"✅ Converted to MP3: {mp3_path}")
+                else:
+                    print(f"⚠️  FFmpeg conversion failed (exit {result.returncode}), using WebM")
+                    print(f"    Full stderr: {result.stderr}")  # Print FULL stderr
+                    print(f"    Full stdout: {result.stdout}")  # Print FULL stdout
+                    print(f"    Using WebM directly (may fail on Sarvam API)")
+                    temp_path = webm_path
+            except Exception as e:
+                print(f"⚠️  FFmpeg error: {e}")
+                print(f"    Using WebM directly")
+                temp_path = webm_path
+        else:
+            # ElevenLabs - use webm directly (no conversion needed)
+            temp_path = webm_path
+            print(f"✅ Using WebM directly for ElevenLabs")
+
+        try:
+            start_time = time.time()
+
+            if use_sarvam:
+                # Call Sarvam diarization
+                result_data = await _diarize_chunk_sarvam(temp_path, language, num_speakers)
+            else:
+                # Call ElevenLabs diarization
+                result_data = await _diarize_chunk_elevenlabs(
+                    temp_path, num_speakers, diarization_threshold
+                )
+
+            latency = time.time() - start_time
+
+            segments = result_data['segments']
+            detected_speakers = result_data['detected_speakers']
+
+            print(f"  ✓ {latency:.1f}s | Speakers: {detected_speakers} | Segments: {len(segments)}")
+
+            # Calculate overlap statistics
+            # Overlap duration is 5 seconds (configurable)
+            OVERLAP_DURATION = 5.0
+
+            # Start overlap: first 5 seconds of chunk (shared with previous chunk)
+            start_overlap_stats = {}
+            if chunk_index > 0:
+                start_overlap_stats = _calculate_overlap_stats(
+                    segments, 0.0, OVERLAP_DURATION
+                )
+                if start_overlap_stats:
+                    print(f"  📍 Start overlap (0-{OVERLAP_DURATION}s): ", end='')
+                    print(', '.join([f"{sid}={st['duration']:.1f}s" for sid, st in start_overlap_stats.items()]))
+
+            # End overlap: last 5 seconds of chunk (shared with next chunk)
+            chunk_duration = chunk_end - chunk_start
+            end_overlap_start = chunk_duration - OVERLAP_DURATION
+            end_overlap_stats = _calculate_overlap_stats(
+                segments, end_overlap_start, chunk_duration
+            )
+            if end_overlap_stats:
+                print(f"  📍 End overlap ({end_overlap_start:.1f}-{chunk_duration:.1f}s): ", end='')
+                print(', '.join([f"{sid}={st['duration']:.1f}s" for sid, st in end_overlap_stats.items()]))
+
+            return {
+                'success': True,
+                'chunk_index': chunk_index,
+                'chunk_start': chunk_start,
+                'chunk_end': chunk_end,
+                'segments': segments,
+                'detected_speakers': detected_speakers,
+                'start_overlap_stats': start_overlap_stats,
+                'end_overlap_stats': end_overlap_stats,
+                'latency_seconds': round(latency, 2),
+                'model': result_data.get('model', 'unknown')
+            }
+
+        finally:
+            # Cleanup temp files
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    except Exception as e:
+        print(f"❌ Chunk {chunk_index} error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Chunk diarization failed: {str(e)}")
+
+
+async def _diarize_chunk_elevenlabs(audio_path: str, num_speakers: Optional[int], threshold: float) -> dict:
+    """Diarize chunk using ElevenLabs Scribe v1"""
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+    if not elevenlabs_key:
+        raise HTTPException(status_code=503, detail="ELEVENLABS_API_KEY not configured")
+
+    async with httpx.AsyncClient(timeout=60.0) as http_client:
+        with open(audio_path, 'rb') as audio_file:
+            mime_type = 'audio/mpeg' if audio_path.endswith('.mp3') else 'audio/webm'
+            filename = os.path.basename(audio_path)
+            files = {'file': (filename, audio_file, mime_type)}
+
+            params = {
+                'model_id': 'scribe_v1',
+                'diarize': 'true',
+                'diarization_threshold': str(threshold),
+                'timestamps_granularity': 'word'
+            }
+
+            if num_speakers:
+                params['num_speakers'] = str(num_speakers)
+
+            response = await http_client.post(
+                'https://api.elevenlabs.io/v1/speech-to-text',
+                headers={'xi-api-key': elevenlabs_key},
+                files=files,
+                params=params
+            )
+
+    response.raise_for_status()
+    data = response.json()
+
+    # Group words by speaker into segments
+    segments = _group_words_by_speaker(data.get('words', []))
+    detected_speakers = list(set(seg['speaker_id'] for seg in segments))
+
+    return {
+        'segments': segments,
+        'detected_speakers': detected_speakers,
+        'model': 'elevenlabs/scribe_v1'
+    }
+
+
+async def _diarize_chunk_sarvam(audio_path: str, language: str, num_speakers: Optional[int]) -> dict:
+    """Diarize chunk using Sarvam AI"""
+    from sarvamai import SarvamAI
+
+    sarvam_key = os.getenv("SARVAM_API_KEY")
+    if not sarvam_key:
+        raise HTTPException(status_code=503, detail="SARVAM_API_KEY not configured")
+
+    try:
+        # Initialize Sarvam client
+        client = SarvamAI(api_subscription_key=sarvam_key)
+
+        # Create batch job with diarization (same pattern as working endpoint)
+        print(f"📤 Creating Sarvam batch job with diarization...")
+        job = client.speech_to_text_translate_job.create_job(
+            model="saaras:v2.5",
+            with_diarization=True,
+            num_speakers=num_speakers or 2
+        )
+
+        job_id = job.job_id
+        print(f"📋 Job created: {job_id}")
+
+        # Upload audio file
+        print(f"📤 Uploading audio file: {audio_path}")
+        upload_success = job.upload_files([audio_path], timeout=60.0)
+        if not upload_success:
+            raise Exception("Failed to upload audio file to Sarvam")
+        print(f"✅ Audio file uploaded")
+
+        # Start the job
+        print(f"▶️  Starting job...")
+        job.start()
+
+        # Wait for job completion (same as working endpoint)
+        print(f"⏳ Waiting for job completion...")
+        job.wait_until_complete(poll_interval=3, timeout=120)
+
+        # Small delay to ensure Sarvam API has finalized the job
+        # (prevents race condition where get_file_results returns empty)
+        time.sleep(2)
+
+        # Verify job completed successfully
+        job_status = job.get_status()
+        print(f"📊 Job status after wait: {job_status}")
+
+        # Check if job_status has job_state attribute or is a string
+        if hasattr(job_status, 'job_state'):
+            state = job_status.job_state
+            print(f"✓ Job state: {state}")
+        else:
+            state = str(job_status)
+            print(f"✓ Job state (string): {state}")
+
+        if state.lower() != 'completed':
+            # Get more details about why it failed
+            error_message = getattr(job_status, 'error_message', 'No error message')
+            job_details = getattr(job_status, 'job_details', [])
+            raise Exception(
+                f"Job did not complete successfully. "
+                f"State: {state}, Error: {error_message}, Details: {job_details}"
+            )
+
+        # Get results
+        print(f"📥 Got results...")
+        results = job.get_file_results()
+        print(f"📊 Results: {results}")
+
+        segments = []
+        detected_speakers = set()
+
+        # Check for failed results first
+        if results and 'failed' in results and results['failed']:
+            failed_files = results['failed']
+            print(f"❌ {len(failed_files)} files failed processing")
+
+            for failed_file in failed_files:
+                error_msg = failed_file.get('error_message', 'Unknown error')
+                file_name = failed_file.get('file_name', 'unknown')
+                status = failed_file.get('status', 'Unknown')
+                print(f"   Failed file: {file_name}")
+                print(f"   Status: {status}")
+                print(f"   Error: {error_msg}")
+
+            # Raise exception instead of silently returning empty segments
+            raise Exception(
+                f"Sarvam diarization failed: {len(failed_files)} file(s) failed. "
+                f"First error: {failed_files[0].get('error_message', 'Unknown')}"
+            )
+
+        # Extract diarized transcript from results
+        if results and 'successful' in results:
+            for file_result in results['successful']:
+                print(f"📄 File result: {file_result}")
+
+                # Check for diarized_transcript directly in file_result first
+                if 'diarized_transcript' in file_result:
+                    diarized = file_result.get('diarized_transcript', [])
+                    print(f"✅ Found diarized_transcript directly with {len(diarized)} segments")
+
+                    for entry in diarized:
+                        speaker = entry.get('speaker', 'speaker 1')
+                        detected_speakers.add(speaker)
+                        segments.append({
+                            'speaker_id': speaker,
+                            'text': entry.get('text', ''),
+                            'start_time': entry.get('start', 0.0),
+                            'end_time': entry.get('end', 0.0)
+                        })
+                    break
+
+                # If not in results directly, download from output_file
+                elif 'output_file' in file_result:
+                    output_filename = file_result.get('output_file')
+                    print(f"📄 Need to download output_file: {output_filename}")
+
+                    # Get download link
+                    download_response = client.speech_to_text_translate_job.get_download_links(
+                        job_id=job_id,
+                        files=[output_filename]
+                    )
+
+                    if output_filename in download_response.download_urls:
+                        download_url = download_response.download_urls[output_filename].file_url
+                        print(f"⬇️  Downloading from: {download_url[:50]}...")
+
+                        # Download and parse JSON
+                        with httpx.Client(timeout=30.0) as http_client:
+                            response = http_client.get(download_url)
+                            response.raise_for_status()
+                            transcript_data = response.json()
+
+                        print(f"✅ Downloaded transcript data")
+
+                        # Extract diarized transcript from downloaded file
+                        if 'diarized_transcript' in transcript_data:
+                            diarized = transcript_data.get('diarized_transcript', [])
+
+                            # Handle both dict format (with 'entries' key) and list format
+                            entries = []
+                            if isinstance(diarized, dict) and 'entries' in diarized:
+                                entries = diarized.get('entries', [])
+                                print(f"✅ Found {len(entries)} entries in diarized dict")
+                            elif isinstance(diarized, list):
+                                entries = diarized
+                                print(f"✅ Found {len(entries)} entries in diarized list")
+                            else:
+                                print(f"⚠️  Unexpected diarized type: {type(diarized)}")
+
+                            # Convert Sarvam format to our standard format
+                            for entry in entries:
+                                if isinstance(entry, dict):
+                                    # Handle both field naming conventions
+                                    speaker = entry.get('speaker_id', entry.get('speaker', 'speaker 1'))
+                                    text = entry.get('transcript', entry.get('text', ''))
+                                    start = entry.get('start_time_seconds', entry.get('start', 0.0))
+                                    end = entry.get('end_time_seconds', entry.get('end', 0.0))
+
+                                    detected_speakers.add(speaker)
+                                    segments.append({
+                                        'speaker_id': speaker,
+                                        'text': text,
+                                        'start_time': start,
+                                        'end_time': end
+                                    })
+                            break
+                        else:
+                            print(f"⚠️  No diarized_transcript in downloaded file")
+                            print(f"    Keys: {list(transcript_data.keys())}")
+        else:
+            print(f"⚠️  No successful results")
+            if results:
+                print(f"    Keys: {list(results.keys())}")
+
+        # Validate that we got segments
+        if not segments:
+            # If job succeeded but no segments, log warning and raise error
+            print(f"⚠️  No segments extracted from diarization")
+            print(f"   Detected speakers: {detected_speakers}")
+            print(f"   This might indicate audio had no speech or very short duration")
+
+            # For chunks, this is likely an error - raise exception
+            raise Exception(
+                f"Sarvam diarization returned 0 segments despite successful completion. "
+                f"Detected {len(detected_speakers)} speakers but no transcript. "
+                f"This may indicate the audio chunk is too short or contains no speech."
+            )
+
+        return {
+            'segments': segments,
+            'detected_speakers': sorted(list(detected_speakers)) or ['speaker 1', 'speaker 2'],
+            'model': 'sarvam/saaras:v2.5'
+        }
+
+    except Exception as e:
+        print(f"❌ Sarvam chunk diarization error: {e}")
+        raise
+
+
+def _group_words_by_speaker(words: list) -> list:
+    """Group consecutive words by same speaker into segments"""
+    if not words:
+        return []
+
+    segments = []
+    current_speaker = None
+    current_segment = []
+
+    for word in words:
+        speaker_id = word.get('speaker_id', 'unknown')
+
+        if speaker_id != current_speaker:
+            # Save previous segment
+            if current_segment:
+                segments.append({
+                    'speaker_id': current_speaker,
+                    'text': ' '.join(w['text'] for w in current_segment),
+                    'start_time': current_segment[0]['start'],
+                    'end_time': current_segment[-1]['end']
+                })
+
+            # Start new segment
+            current_speaker = speaker_id
+            current_segment = [word]
+        else:
+            current_segment.append(word)
+
+    # Save final segment
+    if current_segment:
+        segments.append({
+            'speaker_id': current_speaker,
+            'text': ' '.join(w['text'] for w in current_segment),
+            'start_time': current_segment[0]['start'],
+            'end_time': current_segment[-1]['end']
+        })
+
+    return segments
+
+
+def _calculate_overlap_stats(segments: list, overlap_start: float, overlap_end: float) -> dict:
+    """Calculate speaker statistics in overlap region"""
+    # Filter segments in overlap region
+    overlap_segments = [
+        seg for seg in segments
+        if seg['start_time'] < overlap_end and seg['end_time'] > overlap_start
+    ]
+
+    speaker_stats = {}
+
+    for seg in overlap_segments:
+        speaker_id = seg['speaker_id']
+
+        if speaker_id not in speaker_stats:
+            speaker_stats[speaker_id] = {
+                'speaker_id': speaker_id,
+                'word_count': 0,
+                'duration': 0.0,
+                'segment_count': 0
+            }
+
+        stats = speaker_stats[speaker_id]
+
+        # Calculate actual overlap duration
+        seg_start = max(seg['start_time'], overlap_start)
+        seg_end = min(seg['end_time'], overlap_end)
+        duration = seg_end - seg_start
+
+        stats['word_count'] += len(seg['text'].split())
+        stats['duration'] += duration
+        stats['segment_count'] += 1
+
+    return speaker_stats
+
+
 @app.post("/api/transcribe")
 async def transcribe_audio(audio: UploadFile = File(...)):
     """
@@ -1829,6 +2436,477 @@ Respond with ONLY the JSON object, no other text."""
     except Exception as e:
         print(f"Error saving symptom to Supabase: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save symptom: {str(e)}")
+
+
+# ============================================================================
+# OB/GYN FORM ENDPOINTS
+# ============================================================================
+
+class OBGYNFormSectionRequest(BaseModel):
+    """Request body for validating OB/GYN form sections"""
+    section_name: str
+    section_data: dict
+    patient_id: Optional[str] = None
+
+
+class OBGYNFormResponse(BaseModel):
+    """Response model for OB/GYN form operations"""
+    id: str
+    patient_id: str
+    appointment_id: Optional[str] = None
+    form_data: dict
+    status: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class OBGYNFormCreateRequest(BaseModel):
+    """Request body for creating a new OB/GYN form"""
+    patient_id: str
+    appointment_id: Optional[str] = None
+    form_data: dict
+    status: str = "draft"
+
+
+class OBGYNFormUpdateRequest(BaseModel):
+    """Request body for updating an OB/GYN form"""
+    form_data: dict
+    status: Optional[str] = None
+
+
+def validate_obgyn_form_data(form_data: dict) -> tuple[bool, Optional[str]]:
+    """
+    Validate OB/GYN form data for required fields and data types.
+
+    Args:
+        form_data: Dictionary containing form data
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    required_fields = [
+        'patient_demographics',
+        'obstetric_history',
+        'gynecologic_history'
+    ]
+
+    for field in required_fields:
+        if field not in form_data:
+            return False, f"Missing required section: {field}"
+
+    # Validate patient_demographics
+    if not isinstance(form_data.get('patient_demographics'), dict):
+        return False, "patient_demographics must be an object"
+
+    # Validate obstetric_history
+    if not isinstance(form_data.get('obstetric_history'), dict):
+        return False, "obstetric_history must be an object"
+
+    # Validate gynecologic_history
+    if not isinstance(form_data.get('gynecologic_history'), dict):
+        return False, "gynecologic_history must be an object"
+
+    return True, None
+
+
+def get_supabase_client():
+    """Get Supabase client for database operations"""
+    from supabase import create_client, Client
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=500, detail="Supabase configuration not available")
+
+    return create_client(supabase_url, supabase_key)
+
+
+@app.post("/api/obgyn-forms", response_model=OBGYNFormResponse)
+async def create_obgyn_form(request: OBGYNFormCreateRequest):
+    """
+    Create a new OB/GYN form for a patient.
+
+    Args:
+        request: OBGYNFormCreateRequest with patient_id, form_data, and optional appointment_id
+
+    Returns:
+        OBGYNFormResponse with the created form details
+    """
+    try:
+        # Validate form data
+        is_valid, error_msg = validate_obgyn_form_data(request.form_data)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        # Get Supabase client
+        supabase = get_supabase_client()
+
+        # Prepare form data
+        form_record = {
+            "patient_id": request.patient_id,
+            "appointment_id": request.appointment_id,
+            "form_data": request.form_data,
+            "status": request.status
+        }
+
+        print(f"📋 Creating OB/GYN form for patient {request.patient_id}")
+
+        # Insert into database
+        result = supabase.table("obgyn_forms").insert(form_record).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create form")
+
+        form = result.data[0]
+        print(f"✅ OB/GYN form created with ID: {form['id']}")
+
+        return OBGYNFormResponse(
+            id=form['id'],
+            patient_id=form['patient_id'],
+            appointment_id=form.get('appointment_id'),
+            form_data=form['form_data'],
+            status=form['status'],
+            created_at=form.get('created_at'),
+            updated_at=form.get('updated_at')
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error creating OB/GYN form: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create form: {str(e)}")
+
+
+@app.get("/api/obgyn-forms/{form_id}", response_model=OBGYNFormResponse)
+async def get_obgyn_form(form_id: str):
+    """
+    Retrieve an OB/GYN form by ID.
+
+    Args:
+        form_id: The ID of the form to retrieve
+
+    Returns:
+        OBGYNFormResponse with the form details
+    """
+    try:
+        supabase = get_supabase_client()
+
+        print(f"📖 Retrieving OB/GYN form: {form_id}")
+
+        result = supabase.table("obgyn_forms").select("*").eq("id", form_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Form with ID {form_id} not found")
+
+        form = result.data[0]
+        print(f"✅ Retrieved OB/GYN form: {form_id}")
+
+        return OBGYNFormResponse(
+            id=form['id'],
+            patient_id=form['patient_id'],
+            appointment_id=form.get('appointment_id'),
+            form_data=form['form_data'],
+            status=form['status'],
+            created_at=form.get('created_at'),
+            updated_at=form.get('updated_at')
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error retrieving form: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve form: {str(e)}")
+
+
+@app.get("/api/obgyn-forms/patient/{patient_id}")
+async def get_patient_obgyn_forms(patient_id: str):
+    """
+    Retrieve all OB/GYN forms for a specific patient.
+
+    Args:
+        patient_id: The ID of the patient
+
+    Returns:
+        List of OBGYNFormResponse objects for the patient
+    """
+    try:
+        supabase = get_supabase_client()
+
+        print(f"📖 Retrieving all OB/GYN forms for patient: {patient_id}")
+
+        result = supabase.table("obgyn_forms").select("*").eq("patient_id", patient_id).order("created_at", desc=True).execute()
+
+        forms = []
+        for form in result.data:
+            forms.append(OBGYNFormResponse(
+                id=form['id'],
+                patient_id=form['patient_id'],
+                appointment_id=form.get('appointment_id'),
+                form_data=form['form_data'],
+                status=form['status'],
+                created_at=form.get('created_at'),
+                updated_at=form.get('updated_at')
+            ))
+
+        print(f"✅ Retrieved {len(forms)} OB/GYN forms for patient {patient_id}")
+
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "forms": forms,
+            "count": len(forms)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error retrieving patient forms: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve forms: {str(e)}")
+
+
+@app.get("/api/obgyn-forms/appointment/{appointment_id}")
+async def get_appointment_obgyn_form(appointment_id: str):
+    """
+    Retrieve the OB/GYN form associated with a specific appointment.
+
+    Args:
+        appointment_id: The ID of the appointment
+
+    Returns:
+        OBGYNFormResponse for the appointment, or 404 if not found
+    """
+    try:
+        supabase = get_supabase_client()
+
+        print(f"📖 Retrieving OB/GYN form for appointment: {appointment_id}")
+
+        result = supabase.table("obgyn_forms").select("*").eq("appointment_id", appointment_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"No form found for appointment {appointment_id}")
+
+        form = result.data[0]
+        print(f"✅ Retrieved OB/GYN form for appointment {appointment_id}")
+
+        return OBGYNFormResponse(
+            id=form['id'],
+            patient_id=form['patient_id'],
+            appointment_id=form.get('appointment_id'),
+            form_data=form['form_data'],
+            status=form['status'],
+            created_at=form.get('created_at'),
+            updated_at=form.get('updated_at')
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error retrieving appointment form: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve form: {str(e)}")
+
+
+@app.put("/api/obgyn-forms/{form_id}", response_model=OBGYNFormResponse)
+async def update_obgyn_form(form_id: str, request: OBGYNFormUpdateRequest):
+    """
+    Update an existing OB/GYN form.
+
+    Args:
+        form_id: The ID of the form to update
+        request: OBGYNFormUpdateRequest with updated form_data and optional status
+
+    Returns:
+        OBGYNFormResponse with the updated form details
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # First, verify the form exists
+        get_result = supabase.table("obgyn_forms").select("*").eq("id", form_id).execute()
+        if not get_result.data:
+            raise HTTPException(status_code=404, detail=f"Form with ID {form_id} not found")
+
+        # Validate updated form data
+        is_valid, error_msg = validate_obgyn_form_data(request.form_data)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        # Prepare update data
+        update_data = {
+            "form_data": request.form_data
+        }
+
+        if request.status:
+            update_data["status"] = request.status
+
+        print(f"✏️  Updating OB/GYN form: {form_id}")
+
+        # Update the form
+        result = supabase.table("obgyn_forms").update(update_data).eq("id", form_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to update form")
+
+        form = result.data[0]
+        print(f"✅ OB/GYN form updated: {form_id}")
+
+        return OBGYNFormResponse(
+            id=form['id'],
+            patient_id=form['patient_id'],
+            appointment_id=form.get('appointment_id'),
+            form_data=form['form_data'],
+            status=form['status'],
+            created_at=form.get('created_at'),
+            updated_at=form.get('updated_at')
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating OB/GYN form: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update form: {str(e)}")
+
+
+@app.delete("/api/obgyn-forms/{form_id}")
+async def delete_obgyn_form(form_id: str):
+    """
+    Delete an OB/GYN form by ID.
+
+    Args:
+        form_id: The ID of the form to delete
+
+    Returns:
+        Success response with deletion confirmation
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # Verify the form exists before deleting
+        get_result = supabase.table("obgyn_forms").select("id").eq("id", form_id).execute()
+        if not get_result.data:
+            raise HTTPException(status_code=404, detail=f"Form with ID {form_id} not found")
+
+        print(f"🗑️  Deleting OB/GYN form: {form_id}")
+
+        # Delete the form
+        supabase.table("obgyn_forms").delete().eq("id", form_id).execute()
+
+        print(f"✅ OB/GYN form deleted: {form_id}")
+
+        return {
+            "success": True,
+            "message": f"Form {form_id} has been deleted",
+            "form_id": form_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting OB/GYN form: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete form: {str(e)}")
+
+
+@app.post("/api/obgyn-forms/validate")
+async def validate_obgyn_form_section(request: OBGYNFormSectionRequest):
+    """
+    Validate a specific section of an OB/GYN form.
+
+    This endpoint validates form sections against expected data structures
+    and can be called to check individual sections during form filling.
+
+    Args:
+        request: OBGYNFormSectionRequest with section_name and section_data
+
+    Returns:
+        Validation result with success status and any errors found
+    """
+    try:
+        section_name = request.section_name.lower()
+        section_data = request.section_data
+
+        print(f"🔍 Validating OB/GYN form section: {section_name}")
+
+        # Define validation rules for each section
+        validation_rules = {
+            'patient_demographics': {
+                'optional_fields': ['age', 'date_of_birth', 'ethnicity', 'occupation', 'emergency_contact']
+            },
+            'obstetric_history': {
+                'optional_fields': ['gravidity', 'parity', 'abortions', 'living_children', 'complications']
+            },
+            'gynecologic_history': {
+                'optional_fields': ['menarche_age', 'last_menstrual_period', 'cycle_length', 'menstrual_duration', 'gynecologic_conditions']
+            },
+            'medical_history': {
+                'optional_fields': ['conditions', 'medications', 'surgeries', 'allergies']
+            },
+            'physical_examination': {
+                'optional_fields': ['general', 'vital_signs', 'abdominal_exam', 'pelvic_exam', 'findings']
+            },
+            'assessment_plan': {
+                'optional_fields': ['diagnoses', 'recommendations', 'follow_up']
+            }
+        }
+
+        # Check if section is recognized
+        if section_name not in validation_rules and section_name not in ['patient_demographics', 'obstetric_history', 'gynecologic_history']:
+            return {
+                "success": False,
+                "section": section_name,
+                "valid": False,
+                "errors": [f"Unknown section: {section_name}"]
+            }
+
+        # Validate that section_data is a dictionary
+        if not isinstance(section_data, dict):
+            return {
+                "success": False,
+                "section": section_name,
+                "valid": False,
+                "errors": [f"Section data must be an object/dictionary"]
+            }
+
+        errors = []
+
+        # Validate specific sections
+        if section_name == 'patient_demographics':
+            # Validate demographics
+            if 'age' in section_data and not isinstance(section_data['age'], (int, str)):
+                errors.append("age must be a number or string")
+            if 'date_of_birth' in section_data and not isinstance(section_data['date_of_birth'], str):
+                errors.append("date_of_birth must be a string")
+
+        elif section_name == 'obstetric_history':
+            # Validate obstetric data
+            if 'gravidity' in section_data and not isinstance(section_data['gravidity'], (int, str)):
+                errors.append("gravidity must be a number or string")
+            if 'parity' in section_data and not isinstance(section_data['parity'], (int, str)):
+                errors.append("parity must be a number or string")
+
+        elif section_name == 'gynecologic_history':
+            # Validate gynecologic data
+            if 'menarche_age' in section_data and not isinstance(section_data['menarche_age'], (int, str)):
+                errors.append("menarche_age must be a number or string")
+            if 'last_menstrual_period' in section_data and not isinstance(section_data['last_menstrual_period'], str):
+                errors.append("last_menstrual_period must be a string (date)")
+
+        print(f"✅ Validation complete for section: {section_name}")
+
+        return {
+            "success": True,
+            "section": section_name,
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "field_count": len(section_data)
+        }
+
+    except Exception as e:
+        print(f"❌ Error validating form section: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
 
 
 if __name__ == "__main__":
