@@ -2909,6 +2909,624 @@ async def validate_obgyn_form_section(request: OBGYNFormSectionRequest):
         raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
 
 
+# ============================================================================
+# SHARED PATIENT HEALTH RECORDS API ENDPOINTS
+# ============================================================================
+# These endpoints provide access to normalized patient health data shared
+# across all specialties (OB/GYN, Cardiology, etc.)
+#
+# Tables covered:
+# - patient_vitals: Timestamped vital signs
+# - patient_medications: Medication list with temporal tracking
+# - patient_allergies: Allergy list with severity tracking
+# - patient_conditions: Medical conditions/diagnoses
+# - patient_lab_results: Lab test results
+# ============================================================================
+
+
+# ===== PYDANTIC MODELS =====
+
+class PatientVitalsCreate(BaseModel):
+    """Request model for creating patient vitals"""
+    patient_id: str
+    appointment_id: Optional[str] = None
+    consultation_form_id: Optional[str] = None
+    consultation_form_type: Optional[str] = None
+    systolic_bp: Optional[int] = None
+    diastolic_bp: Optional[int] = None
+    heart_rate: Optional[int] = None
+    respiratory_rate: Optional[int] = None
+    temperature_celsius: Optional[float] = None
+    spo2: Optional[int] = None
+    blood_glucose_mg_dl: Optional[int] = None
+    weight_kg: Optional[float] = None
+    height_cm: Optional[float] = None
+    notes: Optional[str] = None
+    source_form_status: Optional[str] = None
+
+
+class PatientVitalsResponse(BaseModel):
+    """Response model for patient vitals"""
+    id: str
+    patient_id: str
+    recorded_at: str
+    recorded_by: Optional[str] = None
+    appointment_id: Optional[str] = None
+    systolic_bp: Optional[int] = None
+    diastolic_bp: Optional[int] = None
+    heart_rate: Optional[int] = None
+    respiratory_rate: Optional[int] = None
+    temperature_celsius: Optional[float] = None
+    spo2: Optional[int] = None
+    blood_glucose_mg_dl: Optional[int] = None
+    weight_kg: Optional[float] = None
+    height_cm: Optional[float] = None
+    bmi: Optional[float] = None
+    notes: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class PatientMedicationCreate(BaseModel):
+    """Request model for creating patient medication"""
+    patient_id: str
+    medication_name: str
+    dosage: str
+    frequency: str
+    route: Optional[str] = None
+    started_date: Optional[str] = None
+    stopped_date: Optional[str] = None
+    status: str = "active"
+    appointment_id: Optional[str] = None
+    indication: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PatientMedicationResponse(BaseModel):
+    """Response model for patient medication"""
+    id: str
+    patient_id: str
+    medication_name: str
+    dosage: str
+    frequency: str
+    route: Optional[str] = None
+    started_date: str
+    stopped_date: Optional[str] = None
+    status: str
+    prescribed_by: Optional[str] = None
+    prescribed_at: Optional[str] = None
+    appointment_id: Optional[str] = None
+    indication: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class PatientAllergyCreate(BaseModel):
+    """Request model for creating patient allergy"""
+    patient_id: str
+    allergen: str
+    allergen_category: Optional[str] = None
+    reaction: Optional[str] = None
+    severity: Optional[str] = None
+    onset_date: Optional[str] = None
+    status: str = "active"
+    notes: Optional[str] = None
+
+
+class PatientAllergyResponse(BaseModel):
+    """Response model for patient allergy"""
+    id: str
+    patient_id: str
+    allergen: str
+    allergen_category: Optional[str] = None
+    reaction: Optional[str] = None
+    severity: Optional[str] = None
+    onset_date: Optional[str] = None
+    status: str
+    recorded_by: Optional[str] = None
+    recorded_at: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class PatientConditionCreate(BaseModel):
+    """Request model for creating patient condition"""
+    patient_id: str
+    condition_name: str
+    icd10_code: Optional[str] = None
+    diagnosed_date: Optional[str] = None
+    status: str = "active"
+    appointment_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PatientConditionResponse(BaseModel):
+    """Response model for patient condition"""
+    id: str
+    patient_id: str
+    condition_name: str
+    icd10_code: Optional[str] = None
+    diagnosed_date: Optional[str] = None
+    status: str
+    diagnosed_by: Optional[str] = None
+    appointment_id: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class PatientLabResultCreate(BaseModel):
+    """Request model for creating patient lab result"""
+    patient_id: str
+    test_date: Optional[str] = None
+    test_type: str
+    appointment_id: Optional[str] = None
+    results: dict
+    interpretation: Optional[str] = None
+    notes: Optional[str] = None
+    lab_name: Optional[str] = None
+
+
+class PatientLabResultResponse(BaseModel):
+    """Response model for patient lab result"""
+    id: str
+    patient_id: str
+    test_date: str
+    test_type: str
+    ordered_by: Optional[str] = None
+    appointment_id: Optional[str] = None
+    results: dict
+    interpretation: Optional[str] = None
+    notes: Optional[str] = None
+    lab_name: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+# ===== PATIENT VITALS ENDPOINTS =====
+
+@app.post("/api/patient-vitals", response_model=PatientVitalsResponse)
+async def create_patient_vitals(vitals: PatientVitalsCreate):
+    """Create a new patient vitals record"""
+    try:
+        supabase = get_supabase_client()
+
+        # Prepare data for insertion
+        vitals_data = vitals.model_dump(exclude_none=True)
+
+        print(f"📝 Creating vitals record for patient: {vitals.patient_id}")
+
+        result = supabase.table("patient_vitals").insert(vitals_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create vitals record")
+
+        print(f"✅ Vitals record created: {result.data[0]['id']}")
+        return result.data[0]
+
+    except Exception as e:
+        print(f"❌ Error creating vitals record: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create vitals record: {str(e)}")
+
+
+@app.get("/api/patient-vitals/patient/{patient_id}")
+async def get_patient_vitals(patient_id: str, limit: int = 10):
+    """Get all vitals records for a patient (most recent first)"""
+    try:
+        supabase = get_supabase_client()
+
+        result = supabase.table("patient_vitals")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .order("recorded_at", desc=True)\
+            .limit(limit)\
+            .execute()
+
+        print(f"✅ Retrieved {len(result.data)} vitals records for patient {patient_id}")
+        return result.data
+
+    except Exception as e:
+        print(f"❌ Error retrieving vitals: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve vitals: {str(e)}")
+
+
+@app.get("/api/patient-vitals/{vitals_id}", response_model=PatientVitalsResponse)
+async def get_vitals_by_id(vitals_id: str):
+    """Get a specific vitals record by ID"""
+    try:
+        supabase = get_supabase_client()
+
+        result = supabase.table("patient_vitals")\
+            .select("*")\
+            .eq("id", vitals_id)\
+            .execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Vitals record {vitals_id} not found")
+
+        return result.data[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error retrieving vitals: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve vitals: {str(e)}")
+
+
+# ===== PATIENT MEDICATIONS ENDPOINTS =====
+
+@app.post("/api/patient-medications", response_model=PatientMedicationResponse)
+async def create_patient_medication(medication: PatientMedicationCreate):
+    """Create a new patient medication record"""
+    try:
+        supabase = get_supabase_client()
+
+        medication_data = medication.model_dump(exclude_none=True)
+
+        print(f"📝 Creating medication record for patient: {medication.patient_id}")
+
+        result = supabase.table("patient_medications").insert(medication_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create medication record")
+
+        print(f"✅ Medication record created: {result.data[0]['id']}")
+        return result.data[0]
+
+    except Exception as e:
+        print(f"❌ Error creating medication record: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create medication record: {str(e)}")
+
+
+@app.get("/api/patient-medications/patient/{patient_id}")
+async def get_patient_medications(patient_id: str, status: Optional[str] = None):
+    """Get all medications for a patient (optionally filtered by status)"""
+    try:
+        supabase = get_supabase_client()
+
+        query = supabase.table("patient_medications")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .order("prescribed_at", desc=True)
+
+        if status:
+            query = query.eq("status", status)
+
+        result = query.execute()
+
+        print(f"✅ Retrieved {len(result.data)} medication records for patient {patient_id}")
+        return result.data
+
+    except Exception as e:
+        print(f"❌ Error retrieving medications: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve medications: {str(e)}")
+
+
+@app.put("/api/patient-medications/{medication_id}", response_model=PatientMedicationResponse)
+async def update_patient_medication(medication_id: str, updates: dict):
+    """Update a patient medication record (e.g., stop date, status)"""
+    try:
+        supabase = get_supabase_client()
+
+        print(f"📝 Updating medication record: {medication_id}")
+
+        result = supabase.table("patient_medications")\
+            .update(updates)\
+            .eq("id", medication_id)\
+            .execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Medication record {medication_id} not found")
+
+        print(f"✅ Medication record updated: {medication_id}")
+        return result.data[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating medication: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update medication: {str(e)}")
+
+
+# ===== PATIENT ALLERGIES ENDPOINTS =====
+
+@app.post("/api/patient-allergies", response_model=PatientAllergyResponse)
+async def create_patient_allergy(allergy: PatientAllergyCreate):
+    """Create a new patient allergy record"""
+    try:
+        supabase = get_supabase_client()
+
+        allergy_data = allergy.model_dump(exclude_none=True)
+
+        print(f"📝 Creating allergy record for patient: {allergy.patient_id}")
+
+        result = supabase.table("patient_allergies").insert(allergy_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create allergy record")
+
+        print(f"✅ Allergy record created: {result.data[0]['id']}")
+        return result.data[0]
+
+    except Exception as e:
+        print(f"❌ Error creating allergy record: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create allergy record: {str(e)}")
+
+
+@app.get("/api/patient-allergies/patient/{patient_id}")
+async def get_patient_allergies(patient_id: str, status: Optional[str] = "active"):
+    """Get all allergies for a patient (default: active only)"""
+    try:
+        supabase = get_supabase_client()
+
+        query = supabase.table("patient_allergies")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .order("recorded_at", desc=True)
+
+        if status:
+            query = query.eq("status", status)
+
+        result = query.execute()
+
+        print(f"✅ Retrieved {len(result.data)} allergy records for patient {patient_id}")
+        return result.data
+
+    except Exception as e:
+        print(f"❌ Error retrieving allergies: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve allergies: {str(e)}")
+
+
+@app.put("/api/patient-allergies/{allergy_id}", response_model=PatientAllergyResponse)
+async def update_patient_allergy(allergy_id: str, updates: dict):
+    """Update a patient allergy record (e.g., mark as resolved)"""
+    try:
+        supabase = get_supabase_client()
+
+        print(f"📝 Updating allergy record: {allergy_id}")
+
+        result = supabase.table("patient_allergies")\
+            .update(updates)\
+            .eq("id", allergy_id)\
+            .execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Allergy record {allergy_id} not found")
+
+        print(f"✅ Allergy record updated: {allergy_id}")
+        return result.data[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating allergy: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update allergy: {str(e)}")
+
+
+# ===== PATIENT CONDITIONS ENDPOINTS =====
+
+@app.post("/api/patient-conditions", response_model=PatientConditionResponse)
+async def create_patient_condition(condition: PatientConditionCreate):
+    """Create a new patient condition record"""
+    try:
+        supabase = get_supabase_client()
+
+        condition_data = condition.model_dump(exclude_none=True)
+
+        print(f"📝 Creating condition record for patient: {condition.patient_id}")
+
+        result = supabase.table("patient_conditions").insert(condition_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create condition record")
+
+        print(f"✅ Condition record created: {result.data[0]['id']}")
+        return result.data[0]
+
+    except Exception as e:
+        print(f"❌ Error creating condition record: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create condition record: {str(e)}")
+
+
+@app.get("/api/patient-conditions/patient/{patient_id}")
+async def get_patient_conditions(patient_id: str, status: Optional[str] = None):
+    """Get all conditions for a patient (optionally filtered by status)"""
+    try:
+        supabase = get_supabase_client()
+
+        query = supabase.table("patient_conditions")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .order("created_at", desc=True)
+
+        if status:
+            query = query.eq("status", status)
+
+        result = query.execute()
+
+        print(f"✅ Retrieved {len(result.data)} condition records for patient {patient_id}")
+        return result.data
+
+    except Exception as e:
+        print(f"❌ Error retrieving conditions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve conditions: {str(e)}")
+
+
+@app.put("/api/patient-conditions/{condition_id}", response_model=PatientConditionResponse)
+async def update_patient_condition(condition_id: str, updates: dict):
+    """Update a patient condition record (e.g., mark as resolved)"""
+    try:
+        supabase = get_supabase_client()
+
+        print(f"📝 Updating condition record: {condition_id}")
+
+        result = supabase.table("patient_conditions")\
+            .update(updates)\
+            .eq("id", condition_id)\
+            .execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Condition record {condition_id} not found")
+
+        print(f"✅ Condition record updated: {condition_id}")
+        return result.data[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating condition: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update condition: {str(e)}")
+
+
+# ===== PATIENT LAB RESULTS ENDPOINTS =====
+
+@app.post("/api/patient-lab-results", response_model=PatientLabResultResponse)
+async def create_patient_lab_result(lab_result: PatientLabResultCreate):
+    """Create a new patient lab result record"""
+    try:
+        supabase = get_supabase_client()
+
+        lab_result_data = lab_result.model_dump(exclude_none=True)
+
+        print(f"📝 Creating lab result record for patient: {lab_result.patient_id}")
+
+        result = supabase.table("patient_lab_results").insert(lab_result_data).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create lab result record")
+
+        print(f"✅ Lab result record created: {result.data[0]['id']}")
+        return result.data[0]
+
+    except Exception as e:
+        print(f"❌ Error creating lab result record: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create lab result record: {str(e)}")
+
+
+@app.get("/api/patient-lab-results/patient/{patient_id}")
+async def get_patient_lab_results(patient_id: str, test_type: Optional[str] = None, limit: int = 20):
+    """Get all lab results for a patient (optionally filtered by test type)"""
+    try:
+        supabase = get_supabase_client()
+
+        query = supabase.table("patient_lab_results")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .order("test_date", desc=True)\
+            .limit(limit)
+
+        if test_type:
+            query = query.eq("test_type", test_type)
+
+        result = query.execute()
+
+        print(f"✅ Retrieved {len(result.data)} lab result records for patient {patient_id}")
+        return result.data
+
+    except Exception as e:
+        print(f"❌ Error retrieving lab results: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve lab results: {str(e)}")
+
+
+@app.get("/api/patient-lab-results/{result_id}", response_model=PatientLabResultResponse)
+async def get_lab_result_by_id(result_id: str):
+    """Get a specific lab result by ID"""
+    try:
+        supabase = get_supabase_client()
+
+        result = supabase.table("patient_lab_results")\
+            .select("*")\
+            .eq("id", result_id)\
+            .execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Lab result {result_id} not found")
+
+        return result.data[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error retrieving lab result: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve lab result: {str(e)}")
+
+
+# ===== UNIFIED PATIENT HEALTH SUMMARY ENDPOINT =====
+
+@app.get("/api/patient-health-summary/{patient_id}")
+async def get_patient_health_summary(patient_id: str):
+    """
+    Get a comprehensive health summary for a patient including:
+    - Latest vitals
+    - Active medications
+    - Active allergies
+    - Active conditions
+    - Recent lab results
+    """
+    try:
+        supabase = get_supabase_client()
+
+        print(f"📊 Fetching health summary for patient: {patient_id}")
+
+        # Fetch latest vitals
+        vitals = supabase.table("patient_vitals")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .order("recorded_at", desc=True)\
+            .limit(1)\
+            .execute()
+
+        # Fetch active medications
+        medications = supabase.table("patient_medications")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .eq("status", "active")\
+            .order("prescribed_at", desc=True)\
+            .execute()
+
+        # Fetch active allergies
+        allergies = supabase.table("patient_allergies")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .eq("status", "active")\
+            .order("recorded_at", desc=True)\
+            .execute()
+
+        # Fetch active conditions
+        conditions = supabase.table("patient_conditions")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .in_("status", ["active", "chronic"])\
+            .order("created_at", desc=True)\
+            .execute()
+
+        # Fetch recent lab results
+        lab_results = supabase.table("patient_lab_results")\
+            .select("*")\
+            .eq("patient_id", patient_id)\
+            .order("test_date", desc=True)\
+            .limit(5)\
+            .execute()
+
+        summary = {
+            "patient_id": patient_id,
+            "latest_vitals": vitals.data[0] if vitals.data else None,
+            "active_medications": medications.data,
+            "active_allergies": allergies.data,
+            "active_conditions": conditions.data,
+            "recent_lab_results": lab_results.data
+        }
+
+        print(f"✅ Health summary compiled for patient {patient_id}")
+        return summary
+
+    except Exception as e:
+        print(f"❌ Error fetching health summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch health summary: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
