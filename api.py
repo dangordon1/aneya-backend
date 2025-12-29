@@ -4,7 +4,7 @@ Aneya API - FastAPI Backend
 Wraps the Clinical Decision Support Client for the React frontend
 """
 
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
@@ -1711,6 +1711,172 @@ async def diarize_audio_chunk(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Chunk diarization failed: {str(e)}")
+
+
+@app.post("/api/process-final-chunk-async")
+async def process_final_chunk_async(
+    background_tasks: BackgroundTasks,
+    consultation_id: str = Form(...),
+    audio: UploadFile = File(...),
+    chunk_index: int = Form(0),
+    chunk_start: float = Form(0.0),
+    chunk_end: float = Form(30.0),
+    language: Optional[str] = Form(None),
+    num_speakers: Optional[int] = Form(None),
+    diarization_threshold: float = Form(0.22)
+):
+    """
+    Process final audio chunk asynchronously and update consultation
+
+    This endpoint returns immediately after queuing the background task.
+    The consultation is updated via Supabase when processing completes.
+
+    Args:
+        consultation_id: UUID of the consultation to update
+        audio: Audio chunk file (webm)
+        chunk_index: Chunk number
+        chunk_start: Start time in full recording (seconds)
+        chunk_end: End time in full recording (seconds)
+        language: Language code (e.g., "en-IN", "hi-IN")
+        num_speakers: Expected number of speakers
+        diarization_threshold: Speaker change detection threshold
+
+    Returns:
+        {
+            "success": true,
+            "consultation_id": "...",
+            "message": "Processing in background"
+        }
+    """
+    print(f"🚀 Starting async processing for consultation {consultation_id}")
+
+    # Read audio content before background task (file handles can't be passed)
+    audio_content = await audio.read()
+    audio_filename = audio.filename or "chunk.webm"
+
+    # Queue background processing
+    background_tasks.add_task(
+        _process_final_chunk_background,
+        consultation_id=consultation_id,
+        audio_content=audio_content,
+        audio_filename=audio_filename,
+        chunk_index=chunk_index,
+        chunk_start=chunk_start,
+        chunk_end=chunk_end,
+        language=language,
+        num_speakers=num_speakers,
+        diarization_threshold=diarization_threshold
+    )
+
+    return {
+        "success": True,
+        "consultation_id": consultation_id,
+        "message": "Processing in background"
+    }
+
+
+async def _process_final_chunk_background(
+    consultation_id: str,
+    audio_content: bytes,
+    audio_filename: str,
+    chunk_index: int,
+    chunk_start: float,
+    chunk_end: float,
+    language: Optional[str],
+    num_speakers: Optional[int],
+    diarization_threshold: float
+):
+    """Background task to process final chunk and update consultation"""
+    supabase = get_supabase_client()
+
+    try:
+        # Update status to 'processing'
+        print(f"🔄 Updating consultation {consultation_id} to 'processing'")
+        supabase.table('consultations').update({
+            'transcription_status': 'processing',
+            'transcription_started_at': 'now()'
+        }).eq('id', consultation_id).execute()
+
+        # Save audio to temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as f:
+            f.write(audio_content)
+            temp_path = f.name
+
+        try:
+            # Determine which service to use (Sarvam for Indian languages)
+            use_sarvam = language and language in [
+                'en-IN', 'hi-IN', 'bn-IN', 'gu-IN', 'kn-IN', 'ml-IN',
+                'mr-IN', 'od-IN', 'pa-IN', 'ta-IN', 'te-IN'
+            ]
+
+            # Convert WebM to MP3 if using Sarvam (it requires MP3)
+            if use_sarvam and temp_path.endswith('.webm'):
+                mp3_path = temp_path.replace('.webm', '.mp3')
+                import subprocess
+                subprocess.run([
+                    'ffmpeg', '-i', temp_path, '-ar', '16000', '-ac', '1',
+                    '-b:a', '128k', mp3_path, '-y'
+                ], check=True, capture_output=True)
+                os.unlink(temp_path)
+                temp_path = mp3_path
+
+            # Call diarization (reuse existing functions)
+            print(f"🎬 Diarizing chunk {chunk_index} (language: {language}, service: {'Sarvam' if use_sarvam else 'ElevenLabs'})")
+
+            if use_sarvam:
+                result = await _diarize_chunk_sarvam(temp_path, language, num_speakers)
+            else:
+                result = await _diarize_chunk_elevenlabs(temp_path, num_speakers, diarization_threshold)
+
+            # Format transcript as "Speaker: text" format
+            segments = result.get('segments', [])
+            if segments:
+                segments_sorted = sorted(segments, key=lambda s: s.get('start_time', 0))
+                transcript_lines = []
+                for seg in segments_sorted:
+                    speaker = seg.get('speaker_role') or seg.get('speaker_id', 'Unknown')
+                    text = seg.get('text', '')
+                    transcript_lines.append(f"{speaker}: {text}")
+
+                formatted_transcript = '\n\n'.join(transcript_lines)
+
+                # Update consultation with results
+                print(f"✅ Updating consultation {consultation_id} with diarized transcript")
+                supabase.table('consultations').update({
+                    'consultation_text': formatted_transcript,
+                    'transcription_status': 'completed',
+                    'transcription_completed_at': 'now()'
+                }).eq('id', consultation_id).execute()
+
+                print(f"✅ Consultation {consultation_id} updated successfully")
+            else:
+                # No segments found - mark as failed
+                print(f"⚠️  No segments found for consultation {consultation_id}")
+                supabase.table('consultations').update({
+                    'transcription_status': 'failed',
+                    'transcription_error': 'No speaker segments detected',
+                    'transcription_completed_at': 'now()'
+                }).eq('id', consultation_id).execute()
+
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    except Exception as e:
+        print(f"❌ Background processing failed for consultation {consultation_id}: {e}")
+        import traceback
+        traceback.print_exc()
+
+        try:
+            # Update consultation with error status
+            supabase.table('consultations').update({
+                'transcription_status': 'failed',
+                'transcription_error': str(e),
+                'transcription_completed_at': 'now()'
+            }).eq('id', consultation_id).execute()
+        except Exception as update_error:
+            print(f"❌ Failed to update error status: {update_error}")
 
 
 async def _diarize_chunk_elevenlabs(audio_path: str, num_speakers: Optional[int], threshold: float) -> dict:
@@ -3744,6 +3910,553 @@ async def get_patient_health_summary(patient_id: str):
     except Exception as e:
         print(f"❌ Error fetching health summary: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch health summary: {str(e)}")
+
+
+# ===== FORM AUTO-FILL ENDPOINT =====
+
+class ExtractFormFieldsRequest(BaseModel):
+    """Request model for extracting form fields from diarized segments"""
+    diarized_segments: list
+    form_type: str  # 'obgyn', 'infertility', 'antenatal'
+    patient_context: dict
+    current_form_state: dict
+    chunk_index: int
+
+
+class ExtractFormFieldsResponse(BaseModel):
+    """Response model for extracted form fields"""
+    field_updates: dict
+    confidence_scores: dict
+    chunk_index: int
+    extraction_metadata: dict
+
+
+@app.post("/api/extract-form-fields", response_model=ExtractFormFieldsResponse)
+async def extract_form_fields(request: ExtractFormFieldsRequest):
+    """
+    Extract structured form fields from diarized conversation segments.
+
+    This endpoint processes doctor-patient conversation segments from real-time
+    diarization and extracts relevant clinical data to auto-populate form fields.
+    """
+    try:
+        from api.form_schemas import get_schema_for_form_type, build_extraction_prompt_hints
+        from api.field_validator import validate_multiple_fields, filter_by_confidence, exclude_existing_fields
+        import time
+
+        start_time = time.time()
+
+        print(f"📋 Extracting fields for {request.form_type} form (chunk #{request.chunk_index})")
+
+        # Validate form type
+        if request.form_type not in ['obgyn', 'infertility', 'antenatal']:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid form type: {request.form_type}. Expected one of: obgyn, infertility, antenatal"
+            )
+
+        # Filter to doctor-only segments (ignore patient responses)
+        doctor_segments = [
+            seg for seg in request.diarized_segments
+            if seg.get('speaker_role', '').lower() == 'doctor' or seg.get('speaker_id') == 'speaker_0'
+        ]
+
+        if not doctor_segments:
+            print("⚠️  No doctor segments found in chunk")
+            return ExtractFormFieldsResponse(
+                field_updates={},
+                confidence_scores={},
+                chunk_index=request.chunk_index,
+                extraction_metadata={
+                    "segments_analyzed": len(request.diarized_segments),
+                    "doctor_segments": 0,
+                    "processing_time_ms": int((time.time() - start_time) * 1000)
+                }
+            )
+
+        # Build doctor statements text
+        doctor_statements = []
+        for seg in doctor_segments:
+            timestamp = seg.get('start_time', 0)
+            text = seg.get('text', '').strip()
+            if text:
+                doctor_statements.append(f"[{timestamp:.1f}s] {text}")
+
+        doctor_text = "\n".join(doctor_statements)
+
+        # Get schema hints
+        schema_hints = build_extraction_prompt_hints(request.form_type)
+
+        # Build Claude prompt for extraction
+        system_prompt = f"""You are a medical data extraction specialist. Your task is to extract structured clinical data from doctor statements during a consultation.
+
+Extract ONLY information explicitly stated by the doctor. Do NOT infer, guess, or make assumptions.
+
+Form Type: {request.form_type.upper()}
+Available Fields:
+{schema_hints}
+
+Rules:
+1. Extract only NEW information not in current_form_state
+2. Use dot notation for nested fields (e.g., "vital_signs.systolic_bp")
+3. Convert units where needed (Fahrenheit → Celsius, text → numbers)
+4. Skip extraction if confidence < 0.7
+5. For blood pressure, extract both values if stated together (e.g., "120 over 80")
+6. Return JSON with field_updates and confidence_scores
+
+Current Form State (DO NOT extract these fields):
+{json.dumps(request.current_form_state, indent=2)}"""
+
+        user_prompt = f"""Doctor statements from consultation chunk #{request.chunk_index}:
+
+{doctor_text}
+
+Extract all relevant clinical data as JSON:
+{{
+  "field_updates": {{
+    "field.path": value,
+    ...
+  }},
+  "confidence_scores": {{
+    "field.path": 0.0-1.0,
+    ...
+  }}
+}}"""
+
+        # Call Claude Haiku for extraction (using existing client)
+        if not client:
+            raise HTTPException(status_code=500, detail="Claude client not initialized")
+
+        # Use Claude to extract fields
+        message = client.anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",  # Fast, cost-effective model
+            max_tokens=2048,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+
+        # Parse Claude response
+        response_text = message.content[0].text.strip()
+
+        # Extract JSON from response (may have markdown code blocks)
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            # Try to parse the whole response as JSON
+            json_str = response_text
+
+        try:
+            extraction_result = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            print(f"⚠️  Failed to parse Claude response as JSON: {e}")
+            print(f"Response: {response_text[:500]}")
+            return ExtractFormFieldsResponse(
+                field_updates={},
+                confidence_scores={},
+                chunk_index=request.chunk_index,
+                extraction_metadata={
+                    "segments_analyzed": len(request.diarized_segments),
+                    "doctor_segments": len(doctor_segments),
+                    "processing_time_ms": int((time.time() - start_time) * 1000),
+                    "error": "Failed to parse extraction result"
+                }
+            )
+
+        field_updates = extraction_result.get("field_updates", {})
+        confidence_scores = extraction_result.get("confidence_scores", {})
+
+        # Filter by confidence (>= 0.7)
+        field_updates = filter_by_confidence(field_updates, confidence_scores, min_confidence=0.7)
+
+        # Exclude fields already in current form state
+        field_updates = exclude_existing_fields(field_updates, request.current_form_state)
+
+        # Validate all extracted fields
+        valid_updates, validation_errors = validate_multiple_fields(
+            request.form_type,
+            field_updates
+        )
+
+        if validation_errors:
+            print(f"⚠️  Validation errors: {validation_errors}")
+
+        # Filter confidence scores to only validated fields
+        validated_confidence = {
+            k: confidence_scores.get(k, 0.0)
+            for k in valid_updates.keys()
+        }
+
+        processing_time_ms = int((time.time() - start_time) * 1000)
+
+        print(f"✅ Extracted {len(valid_updates)} fields in {processing_time_ms}ms")
+
+        return ExtractFormFieldsResponse(
+            field_updates=valid_updates,
+            confidence_scores=validated_confidence,
+            chunk_index=request.chunk_index,
+            extraction_metadata={
+                "segments_analyzed": len(request.diarized_segments),
+                "doctor_segments": len(doctor_segments),
+                "processing_time_ms": processing_time_ms,
+                "validation_errors_count": len(validation_errors)
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error extracting form fields: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to extract form fields: {str(e)}")
+
+
+# =============================================================================
+# AI FEEDBACK SYSTEM FOR RLHF
+# =============================================================================
+
+class FeedbackSubmitRequest(BaseModel):
+    """Request body for submitting AI feedback"""
+
+    # Required fields
+    consultation_id: str
+    feedback_type: str  # 'transcription', 'summary', 'diagnosis', 'drug_recommendation'
+    feedback_sentiment: str  # 'positive', 'negative'
+
+    # Optional context fields
+    component_identifier: Optional[str] = None  # e.g., 'diagnosis_0', 'drug_paracetamol'
+    component_data: Optional[dict] = None  # Snapshot of content being rated
+
+    # Diagnosis-specific
+    diagnosis_text: Optional[str] = None
+    is_correct_diagnosis: Optional[bool] = False
+
+    # Drug-specific
+    drug_name: Optional[str] = None
+    drug_dosage: Optional[str] = None
+
+    # User context (will be enriched server-side from JWT)
+    user_id: Optional[str] = None
+    user_role: Optional[str] = None
+
+    # Additional context
+    notes: Optional[str] = None
+    metadata: Optional[dict] = None
+
+    def generate_fingerprint(self) -> str:
+        """Generate unique fingerprint to prevent duplicates"""
+        import hashlib
+        data = f"{self.consultation_id}:{self.feedback_type}:{self.component_identifier}:{self.user_id or 'anonymous'}"
+        return hashlib.md5(data.encode()).hexdigest()
+
+
+class FeedbackResponse(BaseModel):
+    """Response after submitting feedback"""
+    id: str
+    success: bool
+    message: str
+    feedback_type: str
+    feedback_sentiment: str
+    created_at: str
+
+
+class FeedbackStatsResponse(BaseModel):
+    """Aggregated feedback statistics"""
+    total_feedback_count: int
+    feedback_by_type: dict
+    feedback_by_sentiment: dict
+    positive_percentage: float
+    top_diagnoses: list
+    top_drugs: list
+    recent_feedback: list
+
+
+@app.post("/api/feedback", response_model=FeedbackResponse)
+async def submit_ai_feedback(request: FeedbackSubmitRequest):
+    """
+    Submit feedback on AI-generated content.
+
+    Supports:
+    - Transcription quality feedback
+    - Summary quality feedback
+    - Diagnosis accuracy feedback (with "correct diagnosis" marking)
+    - Drug recommendation feedback
+
+    Deduplication: Uses fingerprint to prevent duplicate submissions.
+    """
+    try:
+        # Initialize Supabase client
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=500, detail="Supabase configuration missing")
+
+        from supabase import create_client
+        supabase = create_client(supabase_url, supabase_key)
+
+        # Validate feedback_type
+        valid_types = ['transcription', 'summary', 'diagnosis', 'drug_recommendation']
+        if request.feedback_type not in valid_types:
+            raise HTTPException(status_code=400, detail=f"feedback_type must be one of: {valid_types}")
+
+        # Validate feedback_sentiment
+        valid_sentiments = ['positive', 'negative']
+        if request.feedback_sentiment not in valid_sentiments:
+            raise HTTPException(status_code=400, detail=f"feedback_sentiment must be one of: {valid_sentiments}")
+
+        # Type-specific validation
+        if request.feedback_type == 'diagnosis' and not request.diagnosis_text:
+            raise HTTPException(status_code=400, detail="diagnosis_text is required for diagnosis feedback")
+
+        if request.feedback_type == 'drug_recommendation' and not request.drug_name:
+            raise HTTPException(status_code=400, detail="drug_name is required for drug recommendation feedback")
+
+        # Set default user_role if not provided
+        if not request.user_role:
+            request.user_role = 'anonymous'
+
+        # Generate fingerprint for deduplication
+        fingerprint = request.generate_fingerprint()
+
+        # Check for existing feedback with same fingerprint
+        existing = supabase.table('ai_feedback').select('id').eq('fingerprint', fingerprint).execute()
+
+        if existing.data and len(existing.data) > 0:
+            # Update existing feedback instead of creating duplicate
+            feedback_id = existing.data[0]['id']
+
+            from datetime import datetime
+            update_data = {
+                'feedback_sentiment': request.feedback_sentiment,
+                'is_correct_diagnosis': request.is_correct_diagnosis,
+                'notes': request.notes,
+                'metadata': request.metadata or {},
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            result = supabase.table('ai_feedback').update(update_data).eq('id', feedback_id).execute()
+
+            return FeedbackResponse(
+                id=feedback_id,
+                success=True,
+                message="Feedback updated successfully",
+                feedback_type=request.feedback_type,
+                feedback_sentiment=request.feedback_sentiment,
+                created_at=datetime.utcnow().isoformat()
+            )
+
+        # Insert new feedback
+        from datetime import datetime
+        insert_data = {
+            'consultation_id': request.consultation_id,
+            'feedback_type': request.feedback_type,
+            'feedback_sentiment': request.feedback_sentiment,
+            'component_identifier': request.component_identifier,
+            'component_data': request.component_data or {},
+            'diagnosis_text': request.diagnosis_text,
+            'is_correct_diagnosis': request.is_correct_diagnosis or False,
+            'drug_name': request.drug_name,
+            'drug_dosage': request.drug_dosage,
+            'user_id': request.user_id,
+            'user_role': request.user_role,
+            'notes': request.notes,
+            'metadata': request.metadata or {},
+            'fingerprint': fingerprint
+        }
+
+        result = supabase.table('ai_feedback').insert(insert_data).execute()
+
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(status_code=500, detail="Failed to insert feedback")
+
+        feedback_id = result.data[0]['id']
+
+        print(f"✅ Feedback submitted: {feedback_id} - {request.feedback_type} ({request.feedback_sentiment})")
+
+        return FeedbackResponse(
+            id=feedback_id,
+            success=True,
+            message="Feedback submitted successfully",
+            feedback_type=request.feedback_type,
+            feedback_sentiment=request.feedback_sentiment,
+            created_at=datetime.utcnow().isoformat()
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error submitting feedback: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
+
+
+@app.get("/api/feedback/consultation/{consultation_id}")
+async def get_consultation_feedback(consultation_id: str):
+    """
+    Retrieve all feedback for a specific consultation.
+    Useful for displaying feedback history in the UI.
+    """
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=500, detail="Supabase configuration missing")
+
+        from supabase import create_client
+        supabase = create_client(supabase_url, supabase_key)
+
+        result = supabase.table('ai_feedback')\
+            .select('*')\
+            .eq('consultation_id', consultation_id)\
+            .order('created_at', desc=True)\
+            .execute()
+
+        return {
+            "consultation_id": consultation_id,
+            "feedback_count": len(result.data) if result.data else 0,
+            "feedback": result.data if result.data else []
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error retrieving feedback: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/feedback/stats", response_model=FeedbackStatsResponse)
+async def get_feedback_stats(days: int = 30, feedback_type: Optional[str] = None):
+    """
+    Get aggregated feedback statistics for RLHF analysis.
+
+    Query parameters:
+    - days: Number of days to look back (default: 30)
+    - feedback_type: Filter by specific type (optional)
+    """
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=500, detail="Supabase configuration missing")
+
+        from supabase import create_client
+        from datetime import datetime, timedelta
+        supabase = create_client(supabase_url, supabase_key)
+
+        # Calculate date threshold
+        date_threshold = (datetime.utcnow() - timedelta(days=days)).isoformat()
+
+        # Build query
+        query = supabase.table('ai_feedback').select('*').gte('created_at', date_threshold)
+
+        if feedback_type:
+            query = query.eq('feedback_type', feedback_type)
+
+        result = query.execute()
+        feedback_data = result.data if result.data else []
+
+        # Aggregate statistics
+        total_count = len(feedback_data)
+
+        # Count by type
+        by_type = {}
+        for item in feedback_data:
+            ftype = item['feedback_type']
+            by_type[ftype] = by_type.get(ftype, 0) + 1
+
+        # Count by sentiment
+        by_sentiment = {}
+        positive_count = 0
+        for item in feedback_data:
+            sent = item['feedback_sentiment']
+            by_sentiment[sent] = by_sentiment.get(sent, 0) + 1
+            if sent == 'positive':
+                positive_count += 1
+
+        positive_percentage = round((positive_count / total_count * 100), 2) if total_count > 0 else 0.0
+
+        # Top diagnoses with feedback
+        diagnosis_feedback = [f for f in feedback_data if f['feedback_type'] == 'diagnosis']
+        diagnosis_counts = {}
+        for item in diagnosis_feedback:
+            diag = item.get('diagnosis_text', 'Unknown')
+            if diag and diag != 'Unknown':
+                if diag not in diagnosis_counts:
+                    diagnosis_counts[diag] = {'positive': 0, 'negative': 0, 'correct': 0}
+
+                if item['feedback_sentiment'] == 'positive':
+                    diagnosis_counts[diag]['positive'] += 1
+                else:
+                    diagnosis_counts[diag]['negative'] += 1
+
+                if item.get('is_correct_diagnosis'):
+                    diagnosis_counts[diag]['correct'] += 1
+
+        top_diagnoses = [
+            {'diagnosis': diag, **counts}
+            for diag, counts in sorted(
+                diagnosis_counts.items(),
+                key=lambda x: x[1]['positive'] + x[1]['negative'],
+                reverse=True
+            )[:10]
+        ]
+
+        # Top drugs with feedback
+        drug_feedback = [f for f in feedback_data if f['feedback_type'] == 'drug_recommendation']
+        drug_counts = {}
+        for item in drug_feedback:
+            drug = item.get('drug_name', 'Unknown')
+            if drug and drug != 'Unknown':
+                if drug not in drug_counts:
+                    drug_counts[drug] = {'positive': 0, 'negative': 0}
+
+                if item['feedback_sentiment'] == 'positive':
+                    drug_counts[drug]['positive'] += 1
+                else:
+                    drug_counts[drug]['negative'] += 1
+
+        top_drugs = [
+            {'drug': drug, **counts}
+            for drug, counts in sorted(
+                drug_counts.items(),
+                key=lambda x: x[1]['positive'] + x[1]['negative'],
+                reverse=True
+            )[:10]
+        ]
+
+        # Recent feedback (last 20)
+        recent_feedback = sorted(feedback_data, key=lambda x: x['created_at'], reverse=True)[:20]
+
+        return FeedbackStatsResponse(
+            total_feedback_count=total_count,
+            feedback_by_type=by_type,
+            feedback_by_sentiment=by_sentiment,
+            positive_percentage=positive_percentage,
+            top_diagnoses=top_diagnoses,
+            top_drugs=top_drugs,
+            recent_feedback=[
+                {
+                    'id': f['id'],
+                    'type': f['feedback_type'],
+                    'sentiment': f['feedback_sentiment'],
+                    'created_at': f['created_at']
+                }
+                for f in recent_feedback
+            ]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error getting feedback stats: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
