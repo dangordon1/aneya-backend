@@ -471,14 +471,14 @@ CREATE POLICY "Doctors can manage lab results"
 -- ==============================================================================
 
 -- Add foreign key columns to link forms to shared health records
-ALTER TABLE ob_gyn_consultation_forms
+ALTER TABLE obgyn_forms
   ADD COLUMN IF NOT EXISTS vitals_record_id UUID REFERENCES patient_vitals(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS lab_results_record_ids UUID[];
 
-CREATE INDEX IF NOT EXISTS idx_obgyn_forms_vitals_record ON ob_gyn_consultation_forms(vitals_record_id) WHERE vitals_record_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_obgyn_forms_vitals_record ON obgyn_forms(vitals_record_id) WHERE vitals_record_id IS NOT NULL;
 
-COMMENT ON COLUMN ob_gyn_consultation_forms.vitals_record_id IS 'Foreign key to patient_vitals table (shared health record)';
-COMMENT ON COLUMN ob_gyn_consultation_forms.lab_results_record_ids IS 'Array of foreign keys to patient_lab_results table';
+COMMENT ON COLUMN obgyn_forms.vitals_record_id IS 'Foreign key to patient_vitals table (shared health record)';
+COMMENT ON COLUMN obgyn_forms.lab_results_record_ids IS 'Array of foreign keys to patient_lab_results table';
 
 -- ==============================================================================
 -- 8. DATA MIGRATION FROM PATIENTS TABLE

@@ -1,5 +1,5 @@
 # Lightweight Dockerfile for aneya backend on Google Cloud Run
-# Uses Deepgram for transcription (no local models required)
+# Uses ElevenLabs and Sarvam AI for transcription (no local models required)
 FROM --platform=linux/amd64 python:3.12-slim
 
 # Set environment variables
