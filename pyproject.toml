@@ -20,6 +20,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "requests>=2.32.5",
     "resend>=2.0.0",
+    "supabase>=2.0.0",
     "uvicorn>=0.38.0",
 ]
 
