@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Add servers directory to path
-sys.path.insert(0, str(Path(__file__).parent / 'servers'))
-from clinical_decision_support import ConsultationSummary
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from servers.clinical_decision_support.summary import ConsultationSummary
 
 
 # Diarized consultation transcript - 6 weeks pregnant patient with flu symptoms

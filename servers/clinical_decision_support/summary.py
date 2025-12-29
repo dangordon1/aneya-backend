@@ -10,6 +10,7 @@ import json
 from typing import Dict, List, Optional, Any, Tuple
 from anthropic import Anthropic
 import os
+import httpx  # For calling the identify-speaker-roles endpoint
 
 
 class ConsultationSummary:
@@ -69,7 +70,32 @@ class ConsultationSummary:
         parsed = self._parse_diarized_transcript(transcript)
 
         # Step 2: Identify speaker roles (doctor vs patient)
-        speaker_roles = self._identify_speakers(parsed['conversation'])
+        # Try LLM-based identification first (uses full conversation for better accuracy)
+        segments = [
+            {"speaker_id": turn["speaker"], "text": turn["text"], "start_time": 0, "end_time": 0}
+            for turn in parsed['conversation']
+        ]
+
+        speaker_role_mapping = await self._identify_speakers_llm(segments)
+
+        if speaker_role_mapping:
+            # Convert API format to internal format
+            # API returns: {"speaker_0": "Doctor", "speaker_1": "Patient"}
+            # Internal needs: {"doctor": "speaker_0", "patient": "speaker_1"}
+            try:
+                speaker_roles = {
+                    "doctor": next(k for k, v in speaker_role_mapping.items() if v == "Doctor"),
+                    "patient": next(k for k, v in speaker_role_mapping.items() if v == "Patient")
+                }
+                print(f"✅ Using LLM-based speaker identification: {speaker_roles}")
+            except (StopIteration, KeyError):
+                # Fallback to heuristic if conversion fails
+                speaker_roles = self._identify_speakers(parsed['conversation'])
+                print(f"⚠️  LLM format conversion failed, using heuristic: {speaker_roles}")
+        else:
+            # Fallback to heuristic method
+            speaker_roles = self._identify_speakers(parsed['conversation'])
+            print(f"⚠️  Using heuristic speaker identification: {speaker_roles}")
 
         # Step 3: Generate comprehensive summary using Claude
         summary = await self._generate_summary(
@@ -140,6 +166,38 @@ class ConsultationSummary:
             'duration_seconds': max_time,
             'speakers': sorted(list(speakers))
         }
+
+    async def _identify_speakers_llm(self, segments: list) -> Optional[dict]:
+        """
+        Call the LLM-based speaker identification endpoint with full context.
+
+        Args:
+            segments: All conversation segments with speaker_id and text
+
+        Returns:
+            Speaker role mapping (e.g., {"speaker_0": "Doctor", "speaker_1": "Patient"})
+            or None if identification fails
+        """
+        try:
+            # Determine API URL (use environment variable or default to localhost)
+            api_url = os.getenv("API_URL", "http://localhost:8000")
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{api_url}/api/identify-speaker-roles",
+                    json={"segments": segments, "language": "en-IN"},
+                    timeout=30.0
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("success") and data.get("role_mapping"):
+                        print(f"✅ LLM speaker identification: {data['role_mapping']} ({data.get('segments_analyzed', 0)} segments)")
+                        return data["role_mapping"]
+                else:
+                    print(f"⚠️  LLM speaker identification returned status {response.status_code}")
+        except Exception as e:
+            print(f"⚠️  LLM speaker identification failed: {e}")
+        return None
 
     def _identify_speakers(self, conversation: List[dict]) -> Dict[str, str]:
         """
@@ -423,14 +481,15 @@ Generate a complete structured summary in the following JSON format:
   }},
   "timeline": [
     {{
-      "event": "Symptom onset - description",
-      "timeframe": "5 days ago / since Wednesday / 2 months",
-      "description": "Detailed description of what started"
+      "timeframe": "When this occurred (e.g., '3 months ago', 'last Tuesday', 'since childhood')",
+      "event": "Detailed description of what happened - symptom onset, change in severity, treatment attempt, etc.",
+      "severity": "Severity level if applicable (mild/moderate/severe or descriptive)",
+      "context": "Additional context: triggers, circumstances, patient response, effectiveness of interventions"
     }}
   ],
   "clinical_summary": {{
     "chief_complaint": "Primary reason for visit in one sentence",
-    "history_present_illness": "Detailed chronological description of current illness, including onset, duration, progression, severity, and associated symptoms",
+    "history_present_illness": "Comprehensive chronological narrative of the current illness. Include: detailed timeline of when symptoms started and how they evolved over time; symptom progression showing initial presentation and changes in severity/character; associated symptoms that appeared together or sequentially; aggravating/relieving factors; impact on daily activities; previous similar episodes and their outcomes; treatments tried and their effectiveness; patient's interpretation of their condition. Provide a narrative that gives full context of the disease journey.",
     "review_of_systems": {{
       "constitutional": "Fever, chills, fatigue, etc.",
       "respiratory": "Cough, dyspnea, etc.",
@@ -442,7 +501,7 @@ Generate a complete structured summary in the following JSON format:
       "ent": "Sore throat, ear pain, etc.",
       "other": "Any other relevant systems"
     }},
-    "past_medical_history": "Relevant past medical conditions mentioned (or 'Not discussed')",
+    "past_medical_history": "Comprehensive past medical history including: chronic conditions with their duration; previous similar episodes or past occurrences of current complaint; surgical history with relevant operations and when performed; family history of relevant hereditary or familial conditions; relevant negative history (important conditions explicitly ruled out). Provide detailed context about the patient's medical background. Write 'Not discussed' if no history was mentioned.",
     "medications_current": ["List current medications mentioned", "with dosages if provided"],
     "allergies": "Known allergies or 'None reported' or 'Not discussed'",
     "physical_examination": "Examination findings mentioned by physician (vitals, inspection, palpation, etc.)",
@@ -471,6 +530,19 @@ Generate a complete structured summary in the following JSON format:
     "red_flags": "Any concerning symptoms or findings requiring urgent attention"
   }}
 }}
+
+IMPORTANT: Generate COMPREHENSIVE, DETAILED summaries that provide full clinical context:
+
+- Write narratives, not bullet points - tell the story of the patient's illness
+- Include temporal relationships: "Initially..., then after 2 weeks..., currently..."
+- Capture disease progression: How symptoms evolved, worsened, improved, or changed character
+- Document what the patient has tried: Medications, home remedies, lifestyle changes, and their effects
+- Include patient's own words and descriptions when they add clinical value
+- For chronic conditions: Document the entire disease journey, not just the current episode
+- Connect past medical history to current presentation when relevant
+- Provide sufficient detail that a clinician reading the summary understands the full clinical picture
+
+The goal is to create a comprehensive record that captures the complete patient story.
 
 Important Instructions:
 1. Extract ONLY information explicitly stated in the transcript - do NOT add external medical knowledge

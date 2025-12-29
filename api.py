@@ -1214,11 +1214,11 @@ async def identify_speaker_roles(request: SpeakerRoleRequest):
     """
     Identify which speaker is the doctor vs patient using LLM analysis
 
-    Analyzes the first chunk of conversation to determine speaker roles.
+    Analyzes the FULL conversation to determine speaker roles.
     Uses Claude Haiku for fast, cost-effective inference.
 
     Args:
-        segments: Diarized segments from the first chunk
+        segments: ALL diarized segments from the consultation
         language: Conversation language (for context)
 
     Returns:
@@ -1231,10 +1231,10 @@ async def identify_speaker_roles(request: SpeakerRoleRequest):
 
         # Format conversation for analysis
         conversation_text = ""
-        for seg in request.segments[:20]:  # Use first 20 segments (enough context)
+        for seg in request.segments:  # Use ALL segments for better accuracy
             conversation_text += f"{seg['speaker_id']}: {seg['text']}\n"
 
-        print(f"🔍 Identifying speaker roles from {len(request.segments)} segments")
+        print(f"🔍 Identifying speaker roles from {len(request.segments)} segments (full consultation)")
 
         # Prompt for role identification
         prompt = f"""You are analyzing a medical consultation conversation between a doctor and a patient.
@@ -1289,7 +1289,8 @@ Your response:"""
             "success": True,
             "role_mapping": role_mapping,
             "latency_seconds": round(latency, 2),
-            "model": "claude-3-5-haiku-20241022"
+            "model": "claude-3-5-haiku-20241022",
+            "segments_analyzed": len(request.segments)
         }
 
     except json.JSONDecodeError as e:
@@ -1446,10 +1447,10 @@ async def diarize_audio_chunk(
             print(f"  ✓ {latency:.1f}s | Speakers: {detected_speakers} | Segments: {len(segments)}")
 
             # Calculate overlap statistics
-            # Overlap duration is 5 seconds (configurable)
-            OVERLAP_DURATION = 5.0
+            # Overlap duration is 10 seconds (configurable)
+            OVERLAP_DURATION = 10.0
 
-            # Start overlap: first 5 seconds of chunk (shared with previous chunk)
+            # Start overlap: first 10 seconds of chunk (shared with previous chunk)
             start_overlap_stats = {}
             if chunk_index > 0:
                 start_overlap_stats = _calculate_overlap_stats(
@@ -1459,7 +1460,7 @@ async def diarize_audio_chunk(
                     print(f"  📍 Start overlap (0-{OVERLAP_DURATION}s): ", end='')
                     print(', '.join([f"{sid}={st['duration']:.1f}s" for sid, st in start_overlap_stats.items()]))
 
-            # End overlap: last 5 seconds of chunk (shared with next chunk)
+            # End overlap: last 10 seconds of chunk (shared with next chunk)
             chunk_duration = chunk_end - chunk_start
             end_overlap_start = chunk_duration - OVERLAP_DURATION
             end_overlap_stats = _calculate_overlap_stats(
