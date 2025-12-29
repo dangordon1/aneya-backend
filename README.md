@@ -90,6 +90,7 @@ The API will be available at: http://localhost:8000
 | `/api/diarize` | POST | Diarize audio with speaker labels (ElevenLabs) |
 | `/api/diarize-sarvam` | POST | Diarize audio (Sarvam - Indian languages) |
 | `/api/identify-speaker-roles` | POST | Identify doctor vs patient speakers (Claude Haiku) |
+| `/api/rerun-transcription` | POST | Rerun transcription/diarization on past consultations |
 | `/api/get-transcription-token` | GET | Get temporary token for ElevenLabs WebSocket |
 | `/api/get-sarvam-token` | GET | Get API key for Sarvam WebSocket |
 

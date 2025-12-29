@@ -1309,6 +1309,224 @@ Your response:"""
         raise HTTPException(status_code=500, detail=f"Speaker role identification failed: {str(e)}")
 
 
+class RerunTranscriptionRequest(BaseModel):
+    consultation_id: str  # UUID of consultation to reprocess
+    language: Optional[str] = None  # Optional language override
+
+
+@app.post("/api/rerun-transcription")
+async def rerun_transcription(request: RerunTranscriptionRequest):
+    """
+    Rerun transcription/diarization on a past consultation's audio file.
+
+    Processes the entire audio file at once with speaker diarization and role
+    identification (Doctor vs Patient), then updates the consultation record.
+
+    Args:
+        consultation_id: UUID of the consultation to reprocess
+        language: Optional language code override (e.g., "en-IN", "hi-IN")
+
+    Returns:
+        {
+            "success": true,
+            "consultation_id": "uuid",
+            "transcript": "Doctor: ... Patient: ...",
+            "language": "en-IN",
+            "provider": "sarvam" | "elevenlabs",
+            "speaker_roles": {"speaker_0": "Doctor", "speaker_1": "Patient"},
+            "segments_count": 42,
+            "processing_time_seconds": 45.2
+        }
+    """
+    import anthropic
+
+    start_time = time.time()
+    temp_audio_path = None
+
+    try:
+        # 1. Validate and fetch consultation
+        print(f"🔄 Rerun transcription request for consultation {request.consultation_id}")
+
+        supabase = get_supabase_client()
+
+        # Fetch consultation with appointment data for language detection
+        consultation_result = supabase.from_('consultations').select(
+            '*'
+        ).eq('id', request.consultation_id).single().execute()
+
+        if not consultation_result.data:
+            raise HTTPException(status_code=404, detail="Consultation not found")
+
+        consultation = consultation_result.data
+
+        if not consultation.get('audio_url'):
+            raise HTTPException(status_code=400, detail="No audio file available for this consultation")
+
+        print(f"✅ Found consultation with audio URL: {consultation['audio_url'][:50]}...")
+
+        # 2. Download audio from GCS
+        audio_url = consultation['audio_url']
+
+        # Parse GCS URL: https://storage.googleapis.com/aneya-audio-recordings/recordings/...
+        if 'aneya-audio-recordings' not in audio_url:
+            raise HTTPException(status_code=400, detail="Invalid audio URL format")
+
+        blob_path = audio_url.split('aneya-audio-recordings/')[-1]
+        print(f"📥 Downloading audio from GCS: {blob_path}")
+
+        bucket = gcs_client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_path)
+
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="Audio file not found in storage")
+
+        audio_bytes = blob.download_as_bytes()
+        print(f"✅ Downloaded {len(audio_bytes)} bytes")
+
+        # Save to temporary file
+        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix='.webm')
+        temp_audio.write(audio_bytes)
+        temp_audio.close()
+        temp_audio_path = temp_audio.name
+
+        # 3. Detect language
+        language = request.language or consultation.get('transcription_language') or 'en-IN'
+
+        # Determine provider based on language
+        use_sarvam = language in [
+            'en-IN', 'hi-IN', 'bn-IN', 'gu-IN', 'kn-IN',
+            'ml-IN', 'mr-IN', 'od-IN', 'pa-IN', 'ta-IN', 'te-IN'
+        ]
+
+        provider = "sarvam" if use_sarvam else "elevenlabs"
+        print(f"🌐 Language: {language}, Provider: {provider}")
+
+        # 4. Run diarization
+        print(f"🎙️ Starting diarization with {provider}...")
+
+        if use_sarvam:
+            diarization_result = await _diarize_chunk_sarvam(
+                temp_audio_path,
+                language,
+                num_speakers=2
+            )
+        else:
+            diarization_result = await _diarize_chunk_elevenlabs(
+                temp_audio_path,
+                num_speakers=2,
+                threshold=0.22
+            )
+
+        segments = diarization_result.get('segments', [])
+        print(f"✅ Diarization complete: {len(segments)} segments")
+
+        if not segments:
+            raise HTTPException(status_code=500, detail="Diarization produced no segments")
+
+        # 5. Identify speaker roles using Claude Haiku
+        print(f"🔍 Identifying speaker roles...")
+
+        anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        # Format conversation for analysis (use first 50 segments for efficiency)
+        conversation_text = ""
+        for seg in segments[:50]:
+            conversation_text += f"{seg['speaker_id']}: {seg['text']}\n"
+
+        # Prompt for role identification
+        prompt = f"""You are analyzing a medical consultation conversation between a doctor and a patient.
+The conversation has been transcribed with speaker diarization, identifying speakers as "speaker_0" and "speaker_1".
+
+Your task: Determine which speaker is the DOCTOR and which is the PATIENT.
+
+Conversation transcript:
+{conversation_text}
+
+Analysis guidelines:
+- Doctors typically: ask diagnostic questions, use medical terminology, lead the consultation, give advice
+- Patients typically: describe symptoms, answer questions about their health, express concerns
+- Look at speech patterns, question types, and conversational dynamics
+
+Respond with ONLY a JSON object in this exact format (no other text):
+{{"speaker_0": "Doctor", "speaker_1": "Patient"}}
+OR
+{{"speaker_0": "Patient", "speaker_1": "Doctor"}}
+
+Your response:"""
+
+        response = anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=100,
+            temperature=0,
+            messages=[{
+                "role": "user",
+                "content": prompt
+            }]
+        )
+
+        response_text = response.content[0].text.strip()
+
+        # Extract JSON (handle markdown code blocks if present)
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+
+        role_mapping = json.loads(response_text)
+        print(f"✅ Speaker roles identified: {role_mapping}")
+
+        # 6. Format transcript with speaker roles
+        formatted_transcript = ""
+        for seg in segments:
+            speaker_role = role_mapping.get(seg['speaker_id'], seg['speaker_id'])
+            formatted_transcript += f"{speaker_role}: {seg['text']}\n"
+
+        print(f"✅ Formatted transcript: {len(formatted_transcript)} characters")
+
+        # 7. Update database
+        print(f"💾 Updating consultation record...")
+
+        supabase.from_('consultations').update({
+            'original_transcript': formatted_transcript,
+            'transcription_language': language
+        }).eq('id', request.consultation_id).execute()
+
+        print(f"✅ Database updated successfully")
+
+        processing_time = time.time() - start_time
+
+        # 8. Return response
+        return {
+            "success": True,
+            "consultation_id": request.consultation_id,
+            "transcript": formatted_transcript,
+            "language": language,
+            "provider": provider,
+            "speaker_roles": role_mapping,
+            "segments_count": len(segments),
+            "processing_time_seconds": round(processing_time, 2)
+        }
+
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as e:
+        print(f"❌ Failed to parse speaker role response: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to identify speaker roles")
+    except Exception as e:
+        print(f"❌ Rerun transcription error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Transcription rerun failed: {str(e)}")
+    finally:
+        # Cleanup temporary file
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.unlink(temp_audio_path)
+                print(f"🧹 Cleaned up temporary file")
+            except Exception as e:
+                print(f"⚠️ Failed to cleanup temp file: {e}")
+
+
 @app.post("/api/diarize-chunk")
 async def diarize_audio_chunk(
     audio: UploadFile = File(...),
