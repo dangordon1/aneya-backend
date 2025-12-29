@@ -52,7 +52,8 @@ async def _get_journal_quartile(issn: str) -> dict[str, Any]:
     }
 
     params = {
-        "issn": issn
+        "issn": issn,
+        "view": "CITESCORE"  # Request CiteScore view to get percentile data
     }
 
     try:
@@ -73,37 +74,49 @@ async def _get_journal_quartile(issn: str) -> dict[str, Any]:
 
             entry = serial_entry[0] if isinstance(serial_entry, list) else serial_entry
 
-            # Get SJR quartile
-            sjr_list = entry.get("SJRList", {}).get("SJR", [])
-            citescore_list = entry.get("citeScoreYearInfoList", {}).get("citeScoreYearInfo", [])
+            # Get CiteScore percentile data
+            citescore_year_info_list = entry.get("citeScoreYearInfoList", {})
+            citescore_list = citescore_year_info_list.get("citeScoreYearInfo", [])
 
             quartile_info = {
                 "issn": issn,
                 "journal_title": entry.get("dc:title", ""),
                 "publisher": entry.get("dc:publisher", ""),
-                "sjr_quartile": "unknown",
-                "citescore_quartile": "unknown",
-                "overall_quartile": "unknown"
+                "citescore": citescore_year_info_list.get("citeScoreCurrentMetric", "N/A"),
+                "citescore_year": citescore_year_info_list.get("citeScoreCurrentMetricYear", ""),
+                "percentile": None,
+                "quartile": "unknown"
             }
 
-            # Get latest SJR quartile
-            if sjr_list:
-                latest_sjr = sjr_list[0] if isinstance(sjr_list, list) else sjr_list
-                quartile_info["sjr_quartile"] = latest_sjr.get("@quartile", "unknown")
-                quartile_info["sjr_year"] = latest_sjr.get("@year", "")
+            # Extract percentile from most recent complete CiteScore data
+            for year_info in citescore_list:
+                if year_info.get("@status") == "Complete":
+                    cite_score_info_list = year_info.get("citeScoreInformationList", [])
+                    if cite_score_info_list:
+                        cite_score_info = cite_score_info_list[0].get("citeScoreInfo", [])
+                        if cite_score_info:
+                            subject_ranks = cite_score_info[0].get("citeScoreSubjectRank", [])
+                            if subject_ranks:
+                                # Use the first subject area's percentile
+                                percentile = int(subject_ranks[0].get("percentile", 0))
+                                quartile_info["percentile"] = percentile
+                                quartile_info["subject_code"] = subject_ranks[0].get("subjectCode", "")
 
-            # Get latest CiteScore quartile
-            if citescore_list:
-                latest_citescore = citescore_list[0] if isinstance(citescore_list, list) else citescore_list
-                citescore_tracker = latest_citescore.get("citeScoreTracker", {})
-                quartile_info["citescore_quartile"] = citescore_tracker.get("@quartile", "unknown")
-                quartile_info["citescore_year"] = latest_citescore.get("@year", "")
+                                # Calculate quartile from percentile
+                                # Q1 = 76-100%, Q2 = 51-75%, Q3 = 26-50%, Q4 = 1-25%
+                                if percentile >= 76:
+                                    quartile_info["quartile"] = "Q1"
+                                elif percentile >= 51:
+                                    quartile_info["quartile"] = "Q2"
+                                elif percentile >= 26:
+                                    quartile_info["quartile"] = "Q3"
+                                elif percentile >= 1:
+                                    quartile_info["quartile"] = "Q4"
 
-            # Determine overall quartile (use best available)
-            if quartile_info["sjr_quartile"] != "unknown":
-                quartile_info["overall_quartile"] = quartile_info["sjr_quartile"]
-            elif quartile_info["citescore_quartile"] != "unknown":
-                quartile_info["overall_quartile"] = quartile_info["citescore_quartile"]
+                                break  # Use first complete year data
+
+            # Also keep the overall_quartile for backwards compatibility
+            quartile_info["overall_quartile"] = quartile_info["quartile"]
 
             return quartile_info
 
