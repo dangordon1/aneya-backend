@@ -79,19 +79,27 @@ class ConsultationSummary:
         speaker_role_mapping = await self._identify_speakers_llm(segments)
 
         if speaker_role_mapping:
-            # Convert API format to internal format
-            # API returns: {"speaker_0": "Doctor", "speaker_1": "Patient"}
-            # Internal needs: {"doctor": "speaker_0", "patient": "speaker_1"}
+            # Convert API format to internal format (support multi-speaker)
+            # API returns: {"speaker_0": "Doctor", "speaker_1": "Patient", "speaker_2": "Family Member"}
+            # Internal needs: {"doctor": "speaker_0", "patient": "speaker_1", "all_speakers": {...}}
             try:
-                speaker_roles = {
-                    "doctor": next(k for k, v in speaker_role_mapping.items() if v == "Doctor"),
-                    "patient": next(k for k, v in speaker_role_mapping.items() if v == "Patient")
-                }
+                doctor_id = next((k for k, v in speaker_role_mapping.items() if v == "Doctor"), None)
+                patient_id = next((k for k, v in speaker_role_mapping.items() if v == "Patient"), None)
+
+                speaker_roles = {}
+                if doctor_id:
+                    speaker_roles["doctor"] = doctor_id
+                if patient_id:
+                    speaker_roles["patient"] = patient_id
+
+                # Store all speakers for reference (including additional participants)
+                speaker_roles["all_speakers"] = speaker_role_mapping
+
                 print(f"✅ Using LLM-based speaker identification: {speaker_roles}")
-            except (StopIteration, KeyError):
+            except Exception as e:
                 # Fallback to heuristic if conversion fails
                 speaker_roles = self._identify_speakers(parsed['conversation'])
-                print(f"⚠️  LLM format conversion failed, using heuristic: {speaker_roles}")
+                print(f"⚠️  LLM format conversion failed ({e}), using heuristic: {speaker_roles}")
         else:
             # Fallback to heuristic method
             speaker_roles = self._identify_speakers(parsed['conversation'])

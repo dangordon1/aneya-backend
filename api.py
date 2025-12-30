@@ -4,7 +4,7 @@ Aneya API - FastAPI Backend
 Wraps the Clinical Decision Support Client for the React frontend
 """
 
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form, BackgroundTasks
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, BackgroundTasks, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
@@ -590,7 +590,7 @@ async def get_examples():
 
 
 @app.post("/api/translate")
-async def translate_text(request: dict):
+async def translate_text(request: dict = Body(...)):
     """
     Translate text to English using Google Translate
 
@@ -646,7 +646,7 @@ async def translate_text(request: dict):
 
 
 @app.post("/api/summarize")
-async def summarize_text(request: dict):
+async def summarize_text(request: dict = Body(...)):
     """
     Summarize consultation transcript using ConsultationSummary system
 
@@ -678,6 +678,9 @@ async def summarize_text(request: dict):
     """
     if consultation_summary is None:
         raise HTTPException(status_code=503, detail="Consultation summary system not initialized")
+
+    if request is None:
+        raise HTTPException(status_code=400, detail="Request body is required")
 
     text = request.get("text", "").strip()
     original_text = request.get("original_text", "").strip()
@@ -3945,6 +3948,29 @@ class ExtractFormFieldsResponse(BaseModel):
     extraction_metadata: dict
 
 
+class AutoFillConsultationFormRequest(BaseModel):
+    """Request model for auto-filling consultation forms from past consultations"""
+    consultation_id: str
+    appointment_id: str
+    patient_id: str
+    original_transcript: str  # Diarized transcript
+    consultation_text: str    # Summary text (fallback)
+    patient_snapshot: dict    # Patient details
+    force_consultation_type: Optional[str] = None  # For manual override
+
+
+class AutoFillConsultationFormResponse(BaseModel):
+    """Response model for auto-fill consultation form"""
+    success: bool
+    consultation_type: str  # antenatal|infertility|obgyn
+    confidence: float
+    reasoning: str
+    form_id: str
+    form_created: bool  # True if new form was created
+    field_updates: dict  # Fields that were extracted
+    error: Optional[str] = None
+
+
 @app.post("/api/determine-consultation-type", response_model=DetermineConsultationTypeResponse)
 async def determine_consultation_type(request: DetermineConsultationTypeRequest):
     """
@@ -4259,6 +4285,238 @@ Extract all relevant clinical data as JSON:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to extract form fields: {str(e)}")
+
+
+@app.post("/api/auto-fill-consultation-form", response_model=AutoFillConsultationFormResponse)
+async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
+    """
+    Intelligently detect consultation type, create/update form, and auto-fill fields.
+
+    Workflow:
+    1. Parse diarized transcript
+    2. Call determine_consultation_type() to detect type
+    3. Check if form already exists in database
+    4. Create new form if missing, or get existing form
+    5. Call extract_form_fields() to extract data
+    6. Update form with extracted fields
+    7. Return success response with form details
+    """
+    try:
+        from datetime import datetime
+        import traceback
+
+        # Initialize Supabase client
+        supabase = get_supabase_client()
+
+        # Step 1: Parse diarized segments
+        diarized_segments = parse_diarized_transcript(request.original_transcript)
+
+        # Step 2: Determine consultation type using existing endpoint function
+        type_request = DetermineConsultationTypeRequest(
+            diarized_segments=diarized_segments,
+            doctor_specialty='obgyn',
+            patient_context={
+                'patient_id': request.patient_id,
+                'consultation_id': request.consultation_id
+            }
+        )
+        type_result = await determine_consultation_type(type_request)
+
+        consultation_type = type_result.consultation_type
+        confidence = type_result.confidence
+        reasoning = type_result.reasoning
+
+        print(f"📊 Detected: {consultation_type} (confidence: {confidence:.2f})")
+
+        # Step 3: Check if form exists
+        table_name = FORM_TABLE_MAP[consultation_type]
+        existing_form = supabase.table(table_name).select('*').eq(
+            'appointment_id', request.appointment_id
+        ).execute()
+
+        form_created = False
+
+        if existing_form.data and len(existing_form.data) > 0:
+            # Form exists - update it
+            form_id = existing_form.data[0]['id']
+            current_form_state = existing_form.data[0]
+            print(f"📝 Found existing form: {form_id}")
+        else:
+            # Step 4: Create new form
+            print(f"➕ Creating new {consultation_type} form...")
+
+            user_id = request.patient_snapshot.get('user_id')  # None if not present
+            default_data = get_default_form_data(
+                consultation_type,
+                request.appointment_id,
+                request.patient_id,
+                user_id
+            )
+
+            new_form = supabase.table(table_name).insert(default_data).execute()
+
+            if new_form.data and len(new_form.data) > 0:
+                form_id = new_form.data[0]['id']
+                current_form_state = {}
+                form_created = True
+                print(f"✅ Created form: {form_id}")
+            else:
+                raise Exception("Failed to create form")
+
+        # Step 5: Extract form fields using existing endpoint function
+        extraction_request = ExtractFormFieldsRequest(
+            diarized_segments=diarized_segments,
+            form_type=consultation_type,
+            patient_context={'patient_id': request.patient_id},
+            current_form_state=current_form_state,
+            chunk_index=0
+        )
+        extraction_result = await extract_form_fields(extraction_request)
+
+        field_updates = extraction_result.field_updates
+
+        # Step 6: Update form with extracted fields
+        if field_updates:
+            print(f"🔄 Updating form with {len(field_updates)} fields...")
+
+            user_id = request.patient_snapshot.get('user_id')  # None if not present
+            merged_data = {**current_form_state, **field_updates}
+            if user_id:
+                merged_data['updated_by'] = user_id
+            merged_data['updated_at'] = datetime.utcnow().isoformat()
+
+            supabase.table(table_name).update(merged_data).eq(
+                'id', form_id
+            ).execute()
+
+            print(f"✅ Form updated")
+
+        # Step 7: Return success
+        return AutoFillConsultationFormResponse(
+            success=True,
+            consultation_type=consultation_type,
+            confidence=confidence,
+            reasoning=reasoning,
+            form_id=form_id,
+            form_created=form_created,
+            field_updates=field_updates
+        )
+
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        traceback.print_exc()
+
+        # Return error but don't raise (don't block re-summarize)
+        return AutoFillConsultationFormResponse(
+            success=False,
+            consultation_type='obgyn',
+            confidence=0.0,
+            reasoning='Error occurred during form auto-fill',
+            form_id='',
+            form_created=False,
+            field_updates={},
+            error=str(e)
+        )
+
+
+# =============================================================================
+# HELPER FUNCTIONS FOR AUTO-FILL CONSULTATION FORM
+# =============================================================================
+
+# Form table mapping
+FORM_TABLE_MAP = {
+    'obgyn': 'obgyn_consultation_forms',
+    'infertility': 'infertility_consultation_forms',
+    'antenatal': 'antenatal_master_cards'
+}
+
+def get_supabase_client():
+    """Initialize Supabase client with service key for backend operations."""
+    from supabase import create_client, Client
+
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    if not supabase_url or not supabase_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Supabase credentials not configured"
+        )
+
+    return create_client(supabase_url, supabase_key)
+
+def get_default_form_data(form_type: str, appointment_id: str, patient_id: str, user_id: str = None):
+    """Get default form data structure for new form creation."""
+    base = {
+        'appointment_id': appointment_id,
+        'patient_id': patient_id,
+        'form_type': 'during_consultation',
+        'status': 'draft'
+    }
+
+    # Only set user fields if user_id is provided
+    if user_id:
+        base['created_by'] = user_id
+        base['updated_by'] = user_id
+        base['filled_by'] = user_id
+
+    # Return just the base fields - let Supabase handle defaults for other columns
+    return base
+
+def parse_diarized_transcript(transcript: str) -> list:
+    """
+    Parse original_transcript into diarized segments format.
+
+    Expected format:
+    [0.0s] Doctor: Hello...
+    [5.2s] Patient: Hi...
+
+    Returns list of diarized segments with speaker_id, text, timestamps.
+    """
+    segments = []
+
+    if not transcript:
+        return segments
+
+    import re
+    lines = transcript.split('\n')
+
+    for line in lines:
+        # Pattern: [timestamp] Speaker: text
+        match = re.match(r'\[(\d+\.?\d*)s\]\s*(\w+):\s*(.+)', line)
+        if match:
+            timestamp = float(match.group(1))
+            speaker = match.group(2).lower()
+            text = match.group(3).strip()
+
+            segments.append({
+                'start_time': timestamp,
+                'end_time': timestamp + 1.0,
+                'speaker_id': speaker,
+                'speaker_role': speaker,
+                'text': text
+            })
+        elif line.strip():
+            # No timestamp - treat as doctor speaking
+            segments.append({
+                'start_time': 0,
+                'end_time': 0,
+                'speaker_id': 'doctor',
+                'speaker_role': 'doctor',
+                'text': line.strip()
+            })
+
+    # Fallback if no segments parsed
+    if not segments and transcript:
+        segments = [{
+            'start_time': 0,
+            'end_time': 0,
+            'speaker_id': 'doctor',
+            'speaker_role': 'doctor',
+            'text': transcript
+        }]
+
+    return segments
 
 
 # =============================================================================
