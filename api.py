@@ -3912,7 +3912,21 @@ async def get_patient_health_summary(patient_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch health summary: {str(e)}")
 
 
-# ===== FORM AUTO-FILL ENDPOINT =====
+# ===== FORM AUTO-FILL ENDPOINTS =====
+
+class DetermineConsultationTypeRequest(BaseModel):
+    """Request model for determining consultation type from conversation"""
+    diarized_segments: list
+    doctor_specialty: str  # 'obgyn', 'general', etc.
+    patient_context: dict
+
+
+class DetermineConsultationTypeResponse(BaseModel):
+    """Response model for consultation type determination"""
+    consultation_type: str  # 'obgyn', 'infertility', or 'antenatal' (for OBGyn doctors only)
+    confidence: float
+    reasoning: str
+
 
 class ExtractFormFieldsRequest(BaseModel):
     """Request model for extracting form fields from diarized segments"""
@@ -3931,6 +3945,133 @@ class ExtractFormFieldsResponse(BaseModel):
     extraction_metadata: dict
 
 
+@app.post("/api/determine-consultation-type", response_model=DetermineConsultationTypeResponse)
+async def determine_consultation_type(request: DetermineConsultationTypeRequest):
+    """
+    Analyze the first chunk of a consultation to determine the appropriate form type.
+
+    This helps auto-select the correct consultation form based on the conversation content,
+    especially for specialists who handle multiple types of consultations (e.g., OBGyn doctors
+    seeing general gynecology, infertility, or antenatal patients).
+    """
+    try:
+        import time
+        start_time = time.time()
+
+        print(f"🔍 Determining consultation type for {request.doctor_specialty} doctor")
+
+        # Build conversation text
+        conversation_lines = []
+        for seg in request.diarized_segments:
+            text = seg.get('text', '').strip()
+            speaker_role = seg.get('speaker_role', seg.get('speaker_id', 'Unknown')).title()
+            if text:
+                conversation_lines.append(f"{speaker_role}: {text}")
+
+        conversation_text = "\n".join(conversation_lines)
+
+        # Build prompt for Claude
+        system_prompt = """You are a medical consultation classifier for OB/GYN doctors. Analyze the conversation and determine which type of OB/GYN consultation this is.
+
+You MUST classify as ONE of these three types ONLY:
+
+1. **antenatal**: Pregnancy-related care
+   - Indicators: "pregnant", "weeks pregnant", "fetal", "prenatal", "pregnancy test positive", "ultrasound", "antenatal", "baby", "delivery", "due date", "trimester", "expecting"
+   - Examples: prenatal visits, pregnancy complications, fetal monitoring, obstetric care
+
+2. **infertility**: Fertility issues and reproductive challenges
+   - Indicators: "trying to conceive", "can't get pregnant", "difficulty conceiving", "fertility", "IVF", "IUI", "ovulation", "infertility treatment", "not conceiving", "assisted reproduction", "trying for baby"
+   - Examples: difficulty getting pregnant, fertility workup, assisted reproductive technology
+
+3. **obgyn**: General gynecology (DEFAULT if not clearly antenatal or infertility)
+   - Indicators: "irregular periods", "contraception", "menstrual", "pap smear", "pelvic exam", "gynecological", "bleeding", "discharge", "pain", "fibroids", "PCOS", "birth control"
+   - Examples: menstrual issues, contraception counseling, gynecological exams, routine screening
+
+CLASSIFICATION RULES:
+- If conversation mentions CURRENT PREGNANCY → MUST be "antenatal"
+- If about TRYING TO GET PREGNANT or fertility problems → "infertility"
+- If general gynecological issues or uncertain → "obgyn" (default)
+- NEVER return any value other than: antenatal, infertility, or obgyn
+
+Return JSON:
+{
+  "consultation_type": "antenatal|infertility|obgyn",
+  "confidence": 0.0-1.0,
+  "reasoning": "Brief explanation of classification based on conversation keywords"
+}"""
+
+        user_prompt = f"""Doctor Specialty: {request.doctor_specialty}
+
+Conversation:
+{conversation_text}
+
+Classify this consultation:"""
+
+        if not client:
+            raise HTTPException(status_code=500, detail="Claude client not initialized")
+
+        # Use Claude Haiku for fast classification
+        message = client.anthropic_client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=512,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}]
+        )
+
+        response_text = message.content[0].text.strip()
+
+        # Parse JSON response
+        import re
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = response_text
+
+        try:
+            result = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            print(f"⚠️  Failed to parse Claude response: {e}")
+            print(f"Response: {response_text}")
+            # Fallback to default obgyn for OBGyn doctors
+            return DetermineConsultationTypeResponse(
+                consultation_type='obgyn',
+                confidence=0.5,
+                reasoning="Failed to parse AI response, defaulting to general obgyn consultation"
+            )
+
+        consultation_type = result.get('consultation_type', 'obgyn')
+        confidence = result.get('confidence', 0.0)
+        reasoning = result.get('reasoning', '')
+
+        # Validate that the type is one of the allowed three
+        if consultation_type not in ['antenatal', 'infertility', 'obgyn']:
+            print(f"⚠️  Invalid consultation type '{consultation_type}', defaulting to 'obgyn'")
+            consultation_type = 'obgyn'
+            confidence = max(0.3, confidence * 0.5)  # Reduce confidence for invalid response
+
+        processing_time = int((time.time() - start_time) * 1000)
+        print(f"✅ Consultation type: {consultation_type} (confidence: {confidence:.2f}) in {processing_time}ms")
+        print(f"   Reasoning: {reasoning}")
+
+        return DetermineConsultationTypeResponse(
+            consultation_type=consultation_type,
+            confidence=confidence,
+            reasoning=reasoning
+        )
+
+    except Exception as e:
+        print(f"❌ Error determining consultation type: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # Fallback to default obgyn consultation type
+        return DetermineConsultationTypeResponse(
+            consultation_type='obgyn',
+            confidence=0.3,
+            reasoning=f"Error occurred, defaulting to general obgyn consultation: {str(e)}"
+        )
+
+
 @app.post("/api/extract-form-fields", response_model=ExtractFormFieldsResponse)
 async def extract_form_fields(request: ExtractFormFieldsRequest):
     """
@@ -3940,8 +4081,8 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
     diarization and extracts relevant clinical data to auto-populate form fields.
     """
     try:
-        from api.form_schemas import get_schema_for_form_type, build_extraction_prompt_hints
-        from api.field_validator import validate_multiple_fields, filter_by_confidence, exclude_existing_fields
+        from mcp_servers.form_schemas import get_schema_for_form_type, build_extraction_prompt_hints
+        from mcp_servers.field_validator import validate_multiple_fields, filter_by_confidence, exclude_existing_fields
         import time
 
         start_time = time.time()
@@ -3955,61 +4096,69 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
                 detail=f"Invalid form type: {request.form_type}. Expected one of: obgyn, infertility, antenatal"
             )
 
-        # Filter to doctor-only segments (ignore patient responses)
-        doctor_segments = [
-            seg for seg in request.diarized_segments
-            if seg.get('speaker_role', '').lower() == 'doctor' or seg.get('speaker_id') == 'speaker_0'
-        ]
+        # Process ALL segments (both doctor and patient)
+        # Patient responses often contain the critical medical information
+        all_segments = request.diarized_segments
 
-        if not doctor_segments:
-            print("⚠️  No doctor segments found in chunk")
+        if not all_segments:
+            print("⚠️  No conversation segments found in chunk")
             return ExtractFormFieldsResponse(
                 field_updates={},
                 confidence_scores={},
                 chunk_index=request.chunk_index,
                 extraction_metadata={
-                    "segments_analyzed": len(request.diarized_segments),
-                    "doctor_segments": 0,
+                    "segments_analyzed": 0,
+                    "conversation_segments": 0,
                     "processing_time_ms": int((time.time() - start_time) * 1000)
                 }
             )
 
-        # Build doctor statements text
-        doctor_statements = []
-        for seg in doctor_segments:
+        # Build conversation text with speaker labels
+        conversation_lines = []
+        for seg in all_segments:
             timestamp = seg.get('start_time', 0)
             text = seg.get('text', '').strip()
+            speaker_role = seg.get('speaker_role', seg.get('speaker_id', 'Unknown')).title()
             if text:
-                doctor_statements.append(f"[{timestamp:.1f}s] {text}")
+                conversation_lines.append(f"[{timestamp:.1f}s] {speaker_role}: {text}")
 
-        doctor_text = "\n".join(doctor_statements)
+        conversation_text = "\n".join(conversation_lines)
 
         # Get schema hints
         schema_hints = build_extraction_prompt_hints(request.form_type)
 
         # Build Claude prompt for extraction
-        system_prompt = f"""You are a medical data extraction specialist. Your task is to extract structured clinical data from doctor statements during a consultation.
+        system_prompt = f"""You are a medical data extraction specialist. Your task is to extract structured clinical data from a doctor-patient consultation dialogue.
 
-Extract ONLY information explicitly stated by the doctor. Do NOT infer, guess, or make assumptions.
+Extract information from BOTH doctor and patient statements. Patient responses often contain critical medical information (e.g., previous pregnancies, symptoms, medical history).
+
+Extract ONLY information explicitly stated in the conversation. Do NOT infer, guess, or make assumptions.
 
 Form Type: {request.form_type.upper()}
 Available Fields:
 {schema_hints}
 
 Rules:
-1. Extract only NEW information not in current_form_state
-2. Use dot notation for nested fields (e.g., "vital_signs.systolic_bp")
-3. Convert units where needed (Fahrenheit → Celsius, text → numbers)
-4. Skip extraction if confidence < 0.7
-5. For blood pressure, extract both values if stated together (e.g., "120 over 80")
-6. Return JSON with field_updates and confidence_scores
+1. Extract from BOTH doctor questions AND patient answers
+2. Patient responses are the primary source of medical history data
+3. Extract only NEW information not in current_form_state
+4. Use dot notation for nested fields (e.g., "vital_signs.systolic_bp")
+5. Convert units where needed (Fahrenheit → Celsius, text → numbers)
+6. Skip extraction if confidence < 0.7
+7. For blood pressure, extract both values if stated together (e.g., "120 over 80")
+8. Return JSON with field_updates and confidence_scores
+
+Examples:
+- Doctor: "Any previous pregnancies?" → Patient: "Yes, two" → Extract: "obstetric_history.gravida": 2
+- Doctor: "Blood pressure is 120 over 80" → Extract: "vital_signs.systolic_bp": 120, "vital_signs.diastolic_bp": 80
+- Patient: "I've been bleeding heavily for 3 days" → Extract relevant symptoms
 
 Current Form State (DO NOT extract these fields):
 {json.dumps(request.current_form_state, indent=2)}"""
 
-        user_prompt = f"""Doctor statements from consultation chunk #{request.chunk_index}:
+        user_prompt = f"""Doctor-patient conversation from consultation chunk #{request.chunk_index}:
 
-{doctor_text}
+{conversation_text}
 
 Extract all relevant clinical data as JSON:
 {{
@@ -4057,7 +4206,7 @@ Extract all relevant clinical data as JSON:
                 chunk_index=request.chunk_index,
                 extraction_metadata={
                     "segments_analyzed": len(request.diarized_segments),
-                    "doctor_segments": len(doctor_segments),
+                    "conversation_segments": len(all_segments),
                     "processing_time_ms": int((time.time() - start_time) * 1000),
                     "error": "Failed to parse extraction result"
                 }
@@ -4097,7 +4246,7 @@ Extract all relevant clinical data as JSON:
             chunk_index=request.chunk_index,
             extraction_metadata={
                 "segments_analyzed": len(request.diarized_segments),
-                "doctor_segments": len(doctor_segments),
+                "conversation_segments": len(all_segments),
                 "processing_time_ms": processing_time_ms,
                 "validation_errors_count": len(validation_errors)
             }
@@ -4188,7 +4337,7 @@ async def submit_ai_feedback(request: FeedbackSubmitRequest):
     try:
         # Initialize Supabase client
         supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")  # Use service key for backend operations
 
         if not supabase_url or not supabase_key:
             raise HTTPException(status_code=500, detail="Supabase configuration missing")
@@ -4301,7 +4450,7 @@ async def get_consultation_feedback(consultation_id: str):
     """
     try:
         supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")  # Use service key for backend operations
 
         if not supabase_url or not supabase_key:
             raise HTTPException(status_code=500, detail="Supabase configuration missing")
@@ -4339,7 +4488,7 @@ async def get_feedback_stats(days: int = 30, feedback_type: Optional[str] = None
     """
     try:
         supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")  # Use service key for backend operations
 
         if not supabase_url or not supabase_key:
             raise HTTPException(status_code=500, detail="Supabase configuration missing")
