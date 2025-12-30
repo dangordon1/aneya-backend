@@ -2,7 +2,7 @@
 Diagnosis Engine for Clinical Decision Support.
 
 Handles clinical diagnosis analysis using guideline MCP servers and medical literature sources.
-Implements cascading search: Guidelines → BMJ → Scopus (Q1) → Scopus (Q2).
+Implements cascading search: Guidelines → (BMJ + Scopus Q1 in parallel) → Scopus Q2.
 This class owns its own MCP server connections for guideline and literature tools.
 """
 
@@ -532,11 +532,10 @@ class DiagnosisEngine:
         verbose: bool = True
     ) -> Tuple[List[dict], List[dict]]:
         """
-        Cascading literature search: BMJ → Scopus Q1 → Scopus Q2.
+        Cascading literature search: BMJ + Scopus Q1 (parallel) → Scopus Q2.
 
-        Tries medical literature sources in order of quality until sufficient
-        evidence is found. This is called when guidelines don't provide
-        sufficient information.
+        Searches BMJ and Scopus Q1 in parallel for efficiency. Falls back to
+        Scopus Q2 only if neither source provides sufficient evidence.
 
         Args:
             clinical_scenario: Patient case description.
@@ -552,63 +551,64 @@ class DiagnosisEngine:
         all_tool_calls = []
         diagnoses = existing_diagnoses.copy()
 
-        # Step 1: Try BMJ
+        # Get available tools
         bmj_tools = await self.get_bmj_tools()
+        scopus_tools = await self.get_scopus_tools()
+
+        # Step 1: Try BMJ and Scopus Q1 in parallel
+        parallel_searches = []
+        search_names = []
+
         if bmj_tools:
             if verbose:
-                print(f"   [DiagnosisEngine] Trying BMJ literature ({len(bmj_tools)} tools)")
-
-            bmj_diagnoses, bmj_calls = await self._search_literature_source(
-                clinical_scenario,
-                bmj_tools,
-                "BMJ",
-                None,
-                verbose
+                print(f"   [DiagnosisEngine] Searching BMJ literature ({len(bmj_tools)} tools)")
+            parallel_searches.append(
+                self._search_literature_source(
+                    clinical_scenario, bmj_tools, "BMJ", None, verbose=False
+                )
             )
+            search_names.append("BMJ")
 
-            all_tool_calls.extend(bmj_calls)
-
-            if bmj_diagnoses:
-                # Merge new diagnoses
-                existing_names = {d.get('diagnosis', '').lower() for d in diagnoses}
-                for diag in bmj_diagnoses:
-                    if diag.get('diagnosis', '').lower() not in existing_names:
-                        diagnoses.append(diag)
-
-                if verbose:
-                    print(f"   [DiagnosisEngine] BMJ found {len(bmj_diagnoses)} diagnoses")
-                return diagnoses, all_tool_calls
-
-        # Step 2: Try Scopus Q1 (top 25% journals)
-        scopus_tools = await self.get_scopus_tools()
         if scopus_tools:
             if verbose:
-                print(f"   [DiagnosisEngine] BMJ insufficient, trying Scopus Q1 ({len(scopus_tools)} tools)")
-
-            scopus_q1_diagnoses, scopus_q1_calls = await self._search_literature_source(
-                clinical_scenario,
-                scopus_tools,
-                "Scopus",
-                "Q1",
-                verbose
+                print(f"   [DiagnosisEngine] Searching Scopus Q1 journals ({len(scopus_tools)} tools)")
+            parallel_searches.append(
+                self._search_literature_source(
+                    clinical_scenario, scopus_tools, "Scopus", "Q1", verbose=False
+                )
             )
+            search_names.append("Scopus Q1")
 
-            all_tool_calls.extend(scopus_q1_calls)
+        # Run parallel searches
+        if parallel_searches:
+            if verbose and len(parallel_searches) > 1:
+                print(f"   [DiagnosisEngine] Running {len(parallel_searches)} searches in parallel...")
 
-            if scopus_q1_diagnoses:
-                # Merge new diagnoses
-                existing_names = {d.get('diagnosis', '').lower() for d in diagnoses}
-                for diag in scopus_q1_diagnoses:
-                    if diag.get('diagnosis', '').lower() not in existing_names:
-                        diagnoses.append(diag)
+            results = await asyncio.gather(*parallel_searches)
 
+            # Process results from all parallel searches
+            for idx, (source_diagnoses, source_calls) in enumerate(results):
+                all_tool_calls.extend(source_calls)
+
+                if source_diagnoses:
+                    existing_names = {d.get('diagnosis', '').lower() for d in diagnoses}
+                    for diag in source_diagnoses:
+                        if diag.get('diagnosis', '').lower() not in existing_names:
+                            diagnoses.append(diag)
+
+                    if verbose:
+                        print(f"   [DiagnosisEngine] {search_names[idx]} found {len(source_diagnoses)} diagnoses")
+
+            # If we found evidence from parallel searches, return
+            if len(diagnoses) > len(existing_diagnoses):
                 if verbose:
-                    print(f"   [DiagnosisEngine] Scopus Q1 found {len(scopus_q1_diagnoses)} diagnoses")
+                    print(f"   [DiagnosisEngine] Total diagnoses after parallel search: {len(diagnoses)}")
                 return diagnoses, all_tool_calls
 
-            # Step 3: Try Scopus Q2 (top 50% journals)
+        # Step 2: Fall back to Scopus Q2 if parallel searches insufficient
+        if scopus_tools:
             if verbose:
-                print(f"   [DiagnosisEngine] Scopus Q1 insufficient, trying Scopus Q2")
+                print(f"   [DiagnosisEngine] Parallel searches insufficient, trying Scopus Q2")
 
             scopus_q2_diagnoses, scopus_q2_calls = await self._search_literature_source(
                 clinical_scenario,
