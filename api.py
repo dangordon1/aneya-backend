@@ -143,6 +143,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include doctor logo API router
+from doctor_logo_api import router as doctor_logo_router
+app.include_router(doctor_logo_router)
+
 
 class AnalysisRequest(BaseModel):
     """Request body for consultation analysis"""
