@@ -4358,12 +4358,12 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 
         print(f"📊 Detected: {consultation_type} (confidence: {confidence:.2f})")
 
-        # Step 3: Check if form exists
-        table_name = FORM_TABLE_MAP[consultation_type]
-        # Note: Select only 'id' to check existence, avoid schema cache issues
-        # We'll read full form data separately if needed
-        existing_form = supabase.table(table_name).select('id').eq(
+        # Step 3: Check if form exists in unified consultation_forms table
+        # ✨ NEW: Using unified table with JSONB storage
+        existing_form = supabase.table('consultation_forms').select('id, form_data').eq(
             'appointment_id', request.appointment_id
+        ).eq(
+            'form_type', consultation_type
         ).execute()
 
         form_created = False
@@ -4371,10 +4371,10 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         if existing_form.data and len(existing_form.data) > 0:
             # Form exists - update it
             form_id = existing_form.data[0]['id']
-            # Use empty state for first extraction to avoid schema cache issues
-            # Fields will be merged with existing data during update
-            current_form_state = {}
+            # Get existing form_data for context
+            current_form_state = existing_form.data[0].get('form_data', {})
             print(f"📝 Found existing form: {form_id}")
+            print(f"   Existing fields: {list(current_form_state.keys())[:5]}...")
         else:
             # Step 4: Create new form
             print(f"➕ Creating new {consultation_type} form...")
@@ -4408,20 +4408,26 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
                 user_id = '8c55534b-3c7a-436a-bb00-70dc6722439f'
                 print(f"⚠️  Using system default as created_by: {user_id[:8]}...")
 
-            default_data = get_default_form_data(
-                consultation_type,
-                request.appointment_id,
-                request.patient_id,
-                user_id
-            )
+            # ✨ NEW: Create form in unified consultation_forms table with JSONB
+            new_form_data = {
+                'patient_id': request.patient_id,
+                'appointment_id': request.appointment_id,
+                'form_type': consultation_type,
+                'specialty': 'obstetrics_gynecology',  # Based on doctor_specialty
+                'form_data': {},  # Empty JSONB, will be populated by extraction
+                'status': 'draft',
+                'created_by': user_id,
+                'updated_by': user_id,
+                'filled_by': user_id
+            }
 
-            new_form = supabase.table(table_name).insert(default_data).execute()
+            new_form = supabase.table('consultation_forms').insert(new_form_data).execute()
 
             if new_form.data and len(new_form.data) > 0:
                 form_id = new_form.data[0]['id']
                 current_form_state = {}
                 form_created = True
-                print(f"✅ Created form: {form_id}")
+                print(f"✅ Created form in consultation_forms: {form_id}")
             else:
                 raise Exception("Failed to create form")
 
@@ -4442,38 +4448,29 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             print(f"🔄 Updating form with {len(field_updates)} fields...")
             print(f"   Fields to update: {list(field_updates.keys())}")
 
-            # Only update the extracted fields (not merge with existing state)
-            # This avoids schema cache issues with columns that don't exist
-            update_data = {**field_updates}
+            # ✨ NEW: Merge extracted fields into form_data JSONB
+            # Merge with existing data instead of replacing
+            merged_form_data = {**current_form_state, **field_updates}
 
-            # Convert types for integer fields (PostgreSQL won't auto-cast "9.0" to integer)
-            # Antenatal form integer fields
-            integer_fields = ['gestational_age_weeks', 'gravida', 'para', 'live', 'abortions', 'cohabitation_period_months']
-            # OBGYN form integer fields
-            integer_fields += ['number_of_pregnancies', 'number_of_live_births', 'number_of_miscarriages',
-                              'number_of_abortions', 'cycle_length_days', 'menstrual_pain_severity',
-                              'contraception_satisfaction']
-            for field in integer_fields:
-                if field in update_data and update_data[field] is not None:
-                    try:
-                        # Convert "9.0" or "9" to integer 9
-                        update_data[field] = int(float(update_data[field]))
-                    except (ValueError, TypeError):
-                        # If conversion fails, remove the field to avoid DB error
-                        print(f"⚠️  Failed to convert {field}={update_data[field]} to integer, skipping")
-                        del update_data[field]
-
+            # Update the form
             user_id = request.patient_snapshot.get('user_id')
-            if user_id:
-                update_data['updated_by'] = user_id
             from datetime import timezone
-            update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
+
+            update_payload = {
+                'form_data': merged_form_data,  # Store in JSONB column
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+                'status': 'partial'  # Mark as partially filled
+            }
+
+            if user_id:
+                update_payload['updated_by'] = user_id
 
             try:
-                supabase.table(table_name).update(update_data).eq(
+                supabase.table('consultation_forms').update(update_payload).eq(
                     'id', form_id
                 ).execute()
-                print(f"✅ Form updated successfully")
+                print(f"✅ Form updated successfully (JSONB storage)")
+                print(f"   Total fields in form_data: {len(merged_form_data)}")
             except Exception as e:
                 print(f"❌ Error updating form: {str(e)}")
                 # Don't fail the entire request if update fails
@@ -4521,12 +4518,7 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 # HELPER FUNCTIONS FOR AUTO-FILL CONSULTATION FORM
 # =============================================================================
 
-# Form table mapping
-FORM_TABLE_MAP = {
-    'obgyn': 'obgyn_consultation_forms',
-    'infertility': 'infertility_consultation_forms',
-    'antenatal': 'antenatal_forms'
-}
+# ✨ REMOVED: FORM_TABLE_MAP - Now using unified consultation_forms table
 
 def get_supabase_client():
     """Initialize Supabase client with service key for backend operations."""
@@ -4591,23 +4583,7 @@ def build_extraction_prompt_hints_from_schema(schema: dict) -> str:
     return '\n'.join(hints) if hints else "No specific extraction hints available"
 
 
-def get_default_form_data(form_type: str, appointment_id: str, patient_id: str, user_id: str = None):
-    """Get default form data structure for new form creation."""
-    base = {
-        'appointment_id': appointment_id,
-        'patient_id': patient_id,
-        'form_type': 'during_consultation',
-        'status': 'draft'
-    }
-
-    # Only set user fields if user_id is provided
-    if user_id:
-        base['created_by'] = user_id
-        base['updated_by'] = user_id
-        base['filled_by'] = user_id
-
-    # Return just the base fields - let Supabase handle defaults for other columns
-    return base
+# ✨ REMOVED: get_default_form_data() - No longer needed with unified consultation_forms table
 
 def parse_diarized_transcript(transcript: str) -> list:
     """
