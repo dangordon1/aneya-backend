@@ -126,9 +126,9 @@ def process_logo_image(file_bytes: bytes, filename: str) -> tuple[bytes, str]:
         raise ValueError(f"Failed to process image: {str(e)}")
 
 
-async def upload_logo_to_gcs(doctor_id: str, image_bytes: bytes, ext: str) -> str:
+async def upload_logo_to_supabase(doctor_id: str, image_bytes: bytes, ext: str) -> str:
     """
-    Upload logo to Google Cloud Storage
+    Upload logo to Supabase Storage
 
     Args:
         doctor_id: Doctor's UUID
@@ -138,73 +138,69 @@ async def upload_logo_to_gcs(doctor_id: str, image_bytes: bytes, ext: str) -> st
     Returns:
         str: Public URL of uploaded image
     """
-    from api import gcs_client
+    from api import get_supabase_client
 
     try:
         # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = str(uuid.uuid4())[:8]
-        filename = f"logo_{timestamp}_{unique_id}{ext}"
+        filename = f"{doctor_id}/logo_{timestamp}_{unique_id}{ext}"
 
-        # Build GCS path
-        gcs_path = f"{LOGO_PATH_PREFIX}/{doctor_id}/{filename}"
+        print(f"📤 Uploading logo to Supabase Storage: {filename}")
 
-        print(f"📤 Uploading logo to GCS: {gcs_path}")
+        # Get Supabase client
+        supabase = get_supabase_client()
 
-        # Upload to GCS
-        bucket = gcs_client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(gcs_path)
-
-        # Set content type
+        # Upload to Supabase Storage
         content_type = "image/png" if ext == '.png' else "image/jpeg"
-        blob.upload_from_string(image_bytes, content_type=content_type)
 
-        # Make blob publicly accessible
-        blob.make_public()
+        result = supabase.storage.from_('clinic-logos').upload(
+            filename,
+            image_bytes,
+            file_options={"content-type": content_type}
+        )
 
-        # Return public URL
-        public_url = blob.public_url
+        # Get public URL
+        public_url = supabase.storage.from_('clinic-logos').get_public_url(filename)
+
         print(f"✅ Logo uploaded: {public_url}")
 
         return public_url
 
     except Exception as e:
-        raise Exception(f"Failed to upload to GCS: {str(e)}")
+        raise Exception(f"Failed to upload to Supabase Storage: {str(e)}")
 
 
-async def delete_logo_from_gcs(logo_url: str):
+async def delete_logo_from_supabase(logo_url: str):
     """
-    Delete logo from Google Cloud Storage
+    Delete logo from Supabase Storage
 
     Args:
         logo_url: Public URL of the logo to delete
     """
-    from api import gcs_client
+    from api import get_supabase_client
 
     try:
-        # Extract GCS path from URL
-        # Format: https://storage.googleapis.com/{bucket}/{path}
-        if "storage.googleapis.com" in logo_url:
-            parts = logo_url.split(f"{GCS_BUCKET_NAME}/")
-            if len(parts) > 1:
-                gcs_path = parts[1]
+        # Extract filename from Supabase Storage URL
+        # Format: https://{project}.supabase.co/storage/v1/object/public/clinic-logos/{path}
+        if "/clinic-logos/" in logo_url:
+            # Get the path after /clinic-logos/
+            filename = logo_url.split("/clinic-logos/")[1]
 
-                print(f"🗑️  Deleting logo from GCS: {gcs_path}")
+            print(f"🗑️  Deleting logo from Supabase Storage: {filename}")
 
-                bucket = gcs_client.bucket(GCS_BUCKET_NAME)
-                blob = bucket.blob(gcs_path)
+            supabase = get_supabase_client()
 
-                if blob.exists():
-                    blob.delete()
-                    print(f"✅ Logo deleted: {gcs_path}")
-                else:
-                    print(f"⚠️  Logo not found in GCS: {gcs_path}")
+            # Delete from Supabase Storage
+            result = supabase.storage.from_('clinic-logos').remove([filename])
+
+            print(f"✅ Logo deleted: {filename}")
         else:
-            print(f"⚠️  Invalid GCS URL format: {logo_url}")
+            print(f"⚠️  Invalid Supabase Storage URL format: {logo_url}")
 
     except Exception as e:
-        print(f"❌ Failed to delete logo from GCS: {str(e)}")
-        # Don't raise - allow DB update to proceed even if GCS delete fails
+        print(f"❌ Failed to delete logo from Supabase Storage: {str(e)}")
+        # Don't raise - allow DB update to proceed even if storage delete fails
 
 
 @router.post("/api/doctor-logo/upload", response_model=LogoUploadResponse)
@@ -247,8 +243,8 @@ async def upload_clinic_logo(
         print(f"🖼️  Processing logo for doctor {doctor_id}")
         processed_bytes, ext = process_logo_image(file_bytes, file.filename or "logo")
 
-        # Upload to GCS
-        public_url = await upload_logo_to_gcs(doctor_id, processed_bytes, ext)
+        # Upload to Supabase Storage
+        public_url = await upload_logo_to_supabase(doctor_id, processed_bytes, ext)
 
         # Update doctor record
         update_result = supabase.table("doctors").update({
@@ -259,9 +255,9 @@ async def upload_clinic_logo(
         if not update_result.data:
             raise HTTPException(status_code=500, detail="Failed to update doctor record")
 
-        # Delete old logo from GCS (if exists)
+        # Delete old logo from Supabase Storage (if exists)
         if old_logo_url:
-            await delete_logo_from_gcs(old_logo_url)
+            await delete_logo_from_supabase(old_logo_url)
 
         return LogoUploadResponse(
             success=True,
@@ -310,8 +306,8 @@ async def delete_clinic_logo(
                 message="No logo to delete"
             )
 
-        # Delete from GCS
-        await delete_logo_from_gcs(logo_url)
+        # Delete from Supabase Storage
+        await delete_logo_from_supabase(logo_url)
 
         # Update doctor record
         update_result = supabase.table("doctors").update({
