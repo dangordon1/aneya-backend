@@ -882,7 +882,13 @@ def get_field_metadata(form_type: str, field_path: str) -> Optional[Dict[str, An
     Returns:
         Dictionary containing field metadata, or None if field not found
     """
-    schema = get_schema_for_form_type(form_type)
+    # Try to get schema from database first
+    try:
+        from api import get_form_schema_from_db
+        schema = get_form_schema_from_db(form_type, full_metadata=False)
+    except Exception:
+        # Fallback to Python file if database fetch fails
+        schema = get_schema_for_form_type(form_type)
 
     if '.' in field_path:
         # Nested field
