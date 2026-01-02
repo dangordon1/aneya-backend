@@ -399,3 +399,13 @@ yarl==1.22.0
     #   storage3
     #   supabase
     #   supabase-functions
+pillow>=10.0.0
+    # via heidi (form_converter tool)
+pillow-heif>=0.10.1
+    # via heidi (form_converter tool - HEIC conversion)
+jinja2>=3.1.2
+    # via heidi (form_converter tool - template generation)
+reportlab>=4.0.0
+    # via heidi (PDF generation for consultation forms)
+cairosvg>=2.7.0
+    # via heidi (SVG to PNG conversion for clinic logos)

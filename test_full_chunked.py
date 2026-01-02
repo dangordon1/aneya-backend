@@ -1,0 +1,415 @@
+#!/usr/bin/env python
+"""
+Full chunked diarization test with 5-second overlap
+Processes the entire recording file
+"""
+
+import subprocess
+import os
+import time
+import json
+import requests
+from pathlib import Path
+
+INPUT_FILE = "../consultation_recordings/recording-20251221-183930-8d1ecbb2.webm"
+CHUNK_DURATION = 30  # seconds
+OVERLAP_DURATION = 5  # seconds (reduced from 10)
+OUTPUT_DIR = "./chunked_test_output"
+API_URL = "http://localhost:8000/api/diarize"
+
+def get_audio_duration_simple(file_path):
+    """Get approximate duration by decoding with ffmpeg"""
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-i', file_path, '-f', 'null', '-'],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        # Parse stderr for duration: "time=00:01:23.45"
+        for line in result.stderr.split('\n'):
+            if 'time=' in line and 'bitrate=' in line:
+                # Get the last time value (final duration)
+                time_str = line.split('time=')[1].split()[0]
+                # Parse HH:MM:SS.ms
+                parts = time_str.split(':')
+                if len(parts) == 3:
+                    hours = float(parts[0])
+                    minutes = float(parts[1])
+                    seconds = float(parts[2])
+                    duration = hours * 3600 + minutes * 60 + seconds
+                    print(f"⏱️  Detected duration: {duration:.1f}s ({int(duration//60)}m {int(duration%60)}s)")
+                    return duration
+
+        # Fallback: assume reasonable length
+        print("⚠️  Could not detect exact duration, estimating from file size...")
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        # Rough estimate: ~1MB per minute for webm
+        estimated_duration = file_size_mb * 60
+        print(f"⏱️  Estimated duration: {estimated_duration:.1f}s ({int(estimated_duration//60)}m {int(estimated_duration%60)}s)")
+        return estimated_duration
+
+    except Exception as e:
+        print(f"❌ Error getting duration: {e}")
+        return 120  # Default to 2 minutes
+
+def create_chunks(input_file, output_dir, chunk_duration, overlap_duration):
+    """Create all chunks from the full recording"""
+    os.makedirs(output_dir, exist_ok=True)
+
+    total_duration = get_audio_duration_simple(input_file)
+
+    print()
+    print("=" * 80)
+    print("CHUNK CREATION")
+    print("=" * 80)
+    print(f"📁 Input: {input_file}")
+    print(f"⏱️  Duration: {total_duration:.1f}s")
+    print(f"✂️  Chunk size: {chunk_duration}s")
+    print(f"🔗 Overlap: {overlap_duration}s")
+    print()
+
+    chunks = []
+    chunk_index = 0
+    current_time = 0
+
+    while current_time < total_duration:
+        # Calculate chunk boundaries
+        chunk_start = max(0, current_time - overlap_duration) if chunk_index > 0 else 0
+        chunk_end = min(current_time + chunk_duration, total_duration)
+
+        chunk_file = os.path.join(output_dir, f"chunk-{chunk_index:02d}.webm")
+
+        print(f"Creating chunk {chunk_index}: {chunk_start:.1f}s - {chunk_end:.1f}s")
+
+        # Extract chunk
+        result = subprocess.run(
+            [
+                'ffmpeg',
+                '-i', input_file,
+                '-ss', str(chunk_start),
+                '-t', str(chunk_end - chunk_start),
+                '-c', 'copy',
+                '-y',
+                chunk_file
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        if os.path.exists(chunk_file):
+            chunk_size = os.path.getsize(chunk_file) / 1024
+            print(f"  ✓ {chunk_file} ({chunk_size:.1f} KB)")
+
+            chunks.append({
+                'index': chunk_index,
+                'start_time': chunk_start,
+                'end_time': chunk_end,
+                'overlap_start': current_time if chunk_index > 0 else chunk_start,
+                'overlap_end': current_time + overlap_duration if chunk_index > 0 else chunk_start,
+                'file_path': chunk_file
+            })
+        else:
+            print(f"  ❌ Failed: {result.stderr[:200]}")
+
+        # Move to next chunk
+        current_time += chunk_duration
+        chunk_index += 1
+
+        # Safety limit
+        if chunk_index > 50:
+            print("⚠️  Safety limit: 50 chunks maximum")
+            break
+
+    print(f"\n✅ Created {len(chunks)} chunks")
+    return chunks
+
+def diarize_chunk(chunk, api_url):
+    """Send chunk to diarization API"""
+    print(f"\n🔍 Diarizing chunk {chunk['index']} ({chunk['start_time']:.1f}s-{chunk['end_time']:.1f}s)...")
+
+    start = time.time()
+
+    with open(chunk['file_path'], 'rb') as f:
+        files = {'audio': (os.path.basename(chunk['file_path']), f, 'audio/webm')}
+
+        try:
+            response = requests.post(api_url, files=files, timeout=120)
+            response.raise_for_status()
+
+            latency = time.time() - start
+            result = response.json()
+
+            segments = result.get('segments', [])
+            speakers = result.get('detected_speakers', [])
+
+            print(f"  ✓ {latency:.1f}s | Speakers: {speakers} | Segments: {len(segments)}")
+
+            # Calculate overlap stats
+            overlap_start = chunk['overlap_start']
+            overlap_end = chunk['overlap_end']
+
+            overlap_segs = [
+                seg for seg in segments
+                if seg['start_time'] < overlap_end and seg['end_time'] > overlap_start
+            ]
+
+            speaker_stats = {}
+            for seg in overlap_segs:
+                speaker_id = seg['speaker_id']
+                if speaker_id not in speaker_stats:
+                    speaker_stats[speaker_id] = {
+                        'speaker_id': speaker_id,
+                        'duration': 0,
+                        'words': 0,
+                        'segments': 0
+                    }
+
+                seg_start = max(seg['start_time'], overlap_start)
+                seg_end = min(seg['end_time'], overlap_end)
+                duration = seg_end - seg_start
+
+                speaker_stats[speaker_id]['duration'] += duration
+                speaker_stats[speaker_id]['words'] += len(seg['text'].split())
+                speaker_stats[speaker_id]['segments'] += 1
+
+            if speaker_stats:
+                print(f"  📍 Overlap ({overlap_start:.1f}-{overlap_end:.1f}s): ", end='')
+                print(', '.join([f"{sid}={st['duration']:.1f}s" for sid, st in speaker_stats.items()]))
+
+            return {
+                'chunk_index': chunk['index'],
+                'segments': segments,
+                'detected_speakers': speakers,
+                'overlap_stats': speaker_stats,
+                'latency': latency
+            }
+
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+            return {
+                'chunk_index': chunk['index'],
+                'segments': [],
+                'detected_speakers': [],
+                'overlap_stats': {},
+                'latency': time.time() - start,
+                'error': str(e)
+            }
+
+def match_speakers(prev_stats, curr_stats):
+    """Match speakers between chunks based on overlap statistics"""
+    if not prev_stats or not curr_stats:
+        return {}
+
+    # Sort by duration
+    sorted_prev = sorted(prev_stats.items(), key=lambda x: x[1]['duration'], reverse=True)
+    sorted_curr = sorted(curr_stats.items(), key=lambda x: x[1]['duration'], reverse=True)
+
+    mapping = {}
+
+    for i in range(min(len(sorted_prev), len(sorted_curr))):
+        prev_id, prev_data = sorted_prev[i]
+        curr_id, curr_data = sorted_curr[i]
+
+        # Calculate similarity
+        max_duration = max(prev_data['duration'], curr_data['duration'])
+        duration_sim = 1 - abs(prev_data['duration'] - curr_data['duration']) / max_duration if max_duration > 0 else 0
+
+        max_words = max(prev_data['words'], curr_data['words'])
+        word_sim = 1 - abs(prev_data['words'] - curr_data['words']) / max_words if max_words > 0 else 0
+
+        confidence = duration_sim * 0.7 + word_sim * 0.3
+
+        mapping[curr_id] = {
+            'maps_to': prev_id,
+            'confidence': confidence
+        }
+
+    return mapping
+
+def main():
+    print("=" * 80)
+    print("🧪 FULL CHUNKED DIARIZATION TEST (5-second overlap)")
+    print("=" * 80)
+    print()
+
+    # Step 1: Create all chunks
+    chunks = create_chunks(INPUT_FILE, OUTPUT_DIR, CHUNK_DURATION, OVERLAP_DURATION)
+
+    if not chunks:
+        print("❌ No chunks created")
+        return
+
+    # Step 2: Diarize all chunks
+    print()
+    print("=" * 80)
+    print("DIARIZATION")
+    print("=" * 80)
+
+    results = []
+    total_start = time.time()
+
+    for chunk in chunks:
+        result = diarize_chunk(chunk, API_URL)
+        results.append(result)
+
+    total_time = time.time() - total_start
+
+    # Step 3: Match speakers across chunks
+    print()
+    print("=" * 80)
+    print("SPEAKER MATCHING")
+    print("=" * 80)
+    print()
+
+    speaker_mappings = []
+    global_speaker_map = {}  # Maps all chunk speaker IDs to canonical (Chunk 0) IDs
+
+    # Initialize with Chunk 0 speakers
+    if results[0]['detected_speakers']:
+        for speaker_id in results[0]['detected_speakers']:
+            global_speaker_map[f"0_{speaker_id}"] = speaker_id
+
+    for i in range(len(results) - 1):
+        prev_result = results[i]
+        curr_result = results[i + 1]
+
+        print(f"Chunk {i} → Chunk {i+1}:")
+
+        mapping = match_speakers(
+            prev_result['overlap_stats'],
+            curr_result['overlap_stats']
+        )
+
+        if mapping:
+            for curr_id, match_info in mapping.items():
+                prev_id = match_info['maps_to']
+                confidence = match_info['confidence']
+
+                # Get canonical ID from previous chunk
+                prev_key = f"{i}_{prev_id}"
+                canonical_id = global_speaker_map.get(prev_key, prev_id)
+
+                # Map current chunk's speaker to canonical
+                curr_key = f"{i+1}_{curr_id}"
+                global_speaker_map[curr_key] = canonical_id
+
+                status = "✓" if confidence > 0.7 else "⚠️"
+                print(f"  {status} {curr_id} → {canonical_id} ({confidence:.1%})")
+
+            speaker_mappings.append({
+                'from_chunk': i,
+                'to_chunk': i + 1,
+                'mapping': mapping
+            })
+        else:
+            print(f"  ⚠️  No overlap data to match")
+
+    # Step 4: Build merged transcript
+    print()
+    print("=" * 80)
+    print("MERGED TRANSCRIPT")
+    print("=" * 80)
+    print()
+
+    all_segments = []
+
+    for result in results:
+        chunk_idx = result['chunk_index']
+
+        for seg in result['segments']:
+            # Remap speaker ID to canonical
+            orig_speaker = seg['speaker_id']
+            chunk_speaker_key = f"{chunk_idx}_{orig_speaker}"
+            canonical_speaker = global_speaker_map.get(chunk_speaker_key, orig_speaker)
+
+            all_segments.append({
+                'speaker_id': canonical_speaker,
+                'text': seg['text'],
+                'start_time': seg['start_time'],
+                'end_time': seg['end_time'],
+                'chunk_index': chunk_idx
+            })
+
+    # Sort by time
+    all_segments.sort(key=lambda x: x['start_time'])
+
+    # Print transcript
+    for i, seg in enumerate(all_segments[:20]):  # First 20 segments
+        print(f"{seg['start_time']:6.1f}s  {seg['speaker_id']:12s} {seg['text'][:60]}")
+
+    if len(all_segments) > 20:
+        print(f"... and {len(all_segments) - 20} more segments")
+
+    # Step 5: Statistics
+    print()
+    print("=" * 80)
+    print("STATISTICS")
+    print("=" * 80)
+    print()
+
+    successful_chunks = len([r for r in results if 'error' not in r])
+    failed_chunks = len([r for r in results if 'error' in r])
+
+    avg_latency = sum(r['latency'] for r in results) / len(results) if results else 0
+    max_latency = max(r['latency'] for r in results) if results else 0
+
+    print(f"Total chunks: {len(chunks)}")
+    print(f"Successful: {successful_chunks}")
+    print(f"Failed: {failed_chunks}")
+    print()
+    print(f"Total diarization time: {total_time:.1f}s ({total_time/60:.1f}m)")
+    print(f"Average per chunk: {avg_latency:.1f}s")
+    print(f"Max chunk time: {max_latency:.1f}s")
+    print(f"Parallel potential: ~{max_latency:.1f}s (if all parallel)")
+    print()
+    print(f"Total segments: {len(all_segments)}")
+
+    # Detect unique speakers
+    unique_speakers = set(seg['speaker_id'] for seg in all_segments)
+    print(f"Unique speakers: {sorted(unique_speakers)}")
+
+    # Matching success rate
+    if speaker_mappings:
+        total_matches = sum(len(m['mapping']) for m in speaker_mappings)
+        confident_matches = sum(
+            1 for m in speaker_mappings
+            for match in m['mapping'].values()
+            if match['confidence'] > 0.7
+        )
+        print(f"\nSpeaker matching:")
+        print(f"  Total matches: {total_matches}")
+        print(f"  Confident (>70%): {confident_matches} ({confident_matches/total_matches*100:.1f}%)" if total_matches > 0 else "  N/A")
+
+    # Step 6: Save results
+    output_file = os.path.join(OUTPUT_DIR, 'full_test_results.json')
+
+    with open(output_file, 'w') as f:
+        json.dump({
+            'config': {
+                'chunk_duration': CHUNK_DURATION,
+                'overlap_duration': OVERLAP_DURATION,
+                'input_file': INPUT_FILE
+            },
+            'chunks': chunks,
+            'diarization_results': results,
+            'speaker_mappings': speaker_mappings,
+            'global_speaker_map': global_speaker_map,
+            'merged_segments': all_segments
+        }, f, indent=2)
+
+    print(f"\n💾 Results saved to: {output_file}")
+
+    # Save transcript
+    transcript_file = os.path.join(OUTPUT_DIR, 'merged_transcript.txt')
+    with open(transcript_file, 'w') as f:
+        for seg in all_segments:
+            f.write(f"{seg['start_time']:6.1f}s  {seg['speaker_id']:12s} {seg['text']}\n")
+
+    print(f"📝 Transcript saved to: {transcript_file}")
+
+    print("\n✅ Test complete!")
+
+if __name__ == '__main__':
+    main()

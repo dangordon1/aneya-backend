@@ -536,7 +536,16 @@ Generate a complete structured summary in the following JSON format:
     "special_populations": "Pregnancy, pediatric, geriatric, immunocompromised, etc.",
     "safety_considerations": "Medication safety in pregnancy, drug interactions, etc.",
     "red_flags": "Any concerning symptoms or findings requiring urgent attention"
-  }}
+  }},
+  "prescriptions": [
+    {{
+      "drug_name": "Medication name (generic or brand name as stated)",
+      "amount": "Dosage with units (e.g., '500mg', '10ml', '2 tablets')",
+      "method": "Route of administration (e.g., 'oral', 'IV', 'topical', 'subcutaneous')",
+      "frequency": "How often to take (e.g., 'twice daily', 'every 6 hours', 'once at night')",
+      "duration": "How long to continue (e.g., '7 days', '2 weeks', 'until symptoms resolve')"
+    }}
+  ]
 }}
 
 IMPORTANT: Generate COMPREHENSIVE, DETAILED summaries that provide full clinical context:
@@ -552,6 +561,15 @@ IMPORTANT: Generate COMPREHENSIVE, DETAILED summaries that provide full clinical
 
 The goal is to create a comprehensive record that captures the complete patient story.
 
+PRESCRIPTION EXTRACTION INSTRUCTIONS:
+- Extract ALL medications prescribed, recommended, or mentioned by the physician during the consultation
+- Create one entry per medication in the prescriptions array
+- Extract prescriptions ONLY from the doctor's statements, not from patient's current medications
+- Include medications mentioned in the treatment plan, verbal prescriptions, and written prescriptions
+- Handle partial information gracefully - use null for fields not mentioned
+- Use your medical knowledge to correct transcription errors in drug names
+- If NO prescriptions were given, return empty array: "prescriptions": []
+
 Important Instructions:
 1. Extract ONLY information explicitly stated in the transcript - do NOT add external medical knowledge
 2. If something is not mentioned in the transcript, write "Not discussed" or leave the field empty
@@ -563,6 +581,9 @@ Important Instructions:
 8. Extract patient's concerns and questions verbatim when possible
 9. Do NOT infer diagnoses - only capture what the doctor explicitly stated as their assessment
 10. Return ONLY valid JSON, no additional text before or after
+11. For prescriptions: Extract ALL medications prescribed or recommended by the physician
+12. Return empty array if no prescriptions discussed: "prescriptions": []
+13. Ensure each prescription has at least drug_name; other fields can be null if not stated
 
 Generate the structured clinical report from the transcript now:"""
 

@@ -1,0 +1,917 @@
+{
+  "config": {
+    "chunk_duration": 30,
+    "overlap_duration": 5,
+    "input_file": "../consultation_recordings/recording-20251221-183930-8d1ecbb2.webm"
+  },
+  "chunks": [
+    {
+      "index": 0,
+      "start_time": 0,
+      "end_time": 30,
+      "overlap_start": 0,
+      "overlap_end": 0,
+      "file_path": "./chunked_test_output/chunk-00.webm"
+    },
+    {
+      "index": 1,
+      "start_time": 25,
+      "end_time": 60,
+      "overlap_start": 25,
+      "overlap_end": 30,
+      "file_path": "./chunked_test_output/chunk-01.webm"
+    },
+    {
+      "index": 2,
+      "start_time": 55,
+      "end_time": 90,
+      "overlap_start": 55,
+      "overlap_end": 60,
+      "file_path": "./chunked_test_output/chunk-02.webm"
+    },
+    {
+      "index": 3,
+      "start_time": 85,
+      "end_time": 120,
+      "overlap_start": 85,
+      "overlap_end": 90,
+      "file_path": "./chunked_test_output/chunk-03.webm"
+    },
+    {
+      "index": 4,
+      "start_time": 115,
+      "end_time": 128.52,
+      "overlap_start": 115,
+      "overlap_end": 120,
+      "file_path": "./chunked_test_output/chunk-04.webm"
+    }
+  ],
+  "diarization_results": [
+    {
+      "chunk_index": 0,
+      "segments": [
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay.   Uh,   good   evening.  ",
+          "start_time": 0.259,
+          "end_time": 3.519
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Mm-hmm.  ",
+          "start_time": 3.519,
+          "end_time": 3.939
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Uh,   how   are   you?  ",
+          "start_time": 3.939,
+          "end_time": 5.279
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I'm   fine.   (coughs)  ",
+          "start_time": 5.279,
+          "end_time": 6.119
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Uh.   How   are   you   doing?  ",
+          "start_time": 6.119,
+          "end_time": 8.659
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "(coughs)   Mostly   fine.  ",
+          "start_time": 8.659,
+          "end_time": 10.359
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Finally.  ",
+          "start_time": 10.359,
+          "end_time": 10.859
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "But   I'm   having   this   cough   problem   every   day.   Um,   (clears throat)   and   I'm   in   my   first   trimester,   eight   weeks.  ",
+          "start_time": 10.859,
+          "end_time": 18.859
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Mm,   mm,   hmm.   So,   did   you   have   fever?  ",
+          "start_time": 18.859,
+          "end_time": 22.859
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   had   fever   two   weeks   ago.   Very   high   fever.   And   the   fever   went   away.  ",
+          "start_time": 22.859,
+          "end_time": 27.44
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay.   Did   you   take   any   medicines   for   that?",
+          "start_time": 27.44,
+          "end_time": 29.979
+        }
+      ],
+      "detected_speakers": [
+        "speaker_0",
+        "speaker_1"
+      ],
+      "start_overlap_stats": {},
+      "end_overlap_stats": {
+        "speaker_1": {
+          "speaker_id": "speaker_1",
+          "duration": 2.4400000000000013,
+          "words": 14,
+          "segments": 1
+        },
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 2.538999999999998,
+          "words": 8,
+          "segments": 1
+        }
+      },
+      "latency": 2.3585801124572754
+    },
+    {
+      "chunk_index": 1,
+      "segments": [
+        {
+          "speaker_id": "speaker_0",
+          "text": "Very   high   fever   and   fever   went   away.  ",
+          "start_time": 25.0,
+          "end_time": 27.44
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Okay,   did   you   take   any   medicines   for   that?  ",
+          "start_time": 27.44,
+          "end_time": 30.059
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "I   took,   um,   antibiotic,   um,   Augmentin.  ",
+          "start_time": 30.059,
+          "end_time": 35.06
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Okay.   Then?  ",
+          "start_time": 35.06,
+          "end_time": 35.96
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "And   paracetamol.  ",
+          "start_time": 35.96,
+          "end_time": 37.219
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Okay.   Only   these   two   drugs,   no?   Nothing   else?   Okay.   Uh,   but   fever   subsided.  ",
+          "start_time": 37.219,
+          "end_time": 43.1
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Fever   subsided.  ",
+          "start_time": 43.1,
+          "end_time": 43.84
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Okay.   But,   uh,   still   you   are   having   cough?  ",
+          "start_time": 43.84,
+          "end_time": 47.879999999999995
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Yes,   cough-cough   has   been   there   for   like   more   than   two,   two   and   a   half   weeks   now.   Every   day.  ",
+          "start_time": 47.879999999999995,
+          "end_time": 53.5
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Is   it   whole   day   or   any   particular   time   of   the   day?  ",
+          "start_time": 53.5,
+          "end_time": 56.94
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "It   starts   around   the   evening   and   continues   till   night   and...",
+          "start_time": 56.94,
+          "end_time": 59.979
+        }
+      ],
+      "detected_speakers": [
+        "speaker_0",
+        "speaker_1"
+      ],
+      "start_overlap_stats": {
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 2.4400000000000013,
+          "words": 7,
+          "segments": 1
+        },
+        "speaker_1": {
+          "speaker_id": "speaker_1",
+          "duration": 2.5599999999999987,
+          "words": 8,
+          "segments": 1
+        }
+      },
+      "end_overlap_stats": {
+        "speaker_1": {
+          "speaker_id": "speaker_1",
+          "duration": 1.9399999999999977,
+          "words": 11,
+          "segments": 1
+        },
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 3.0390000000000015,
+          "words": 10,
+          "segments": 1
+        }
+      },
+      "latency": 2.6849138736724854
+    },
+    {
+      "chunk_index": 2,
+      "segments": [
+        {
+          "speaker_id": "speaker_0",
+          "text": "At   a   particular   time   of   the   day?  ",
+          "start_time": 55.0,
+          "end_time": 56.74
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "It   starts   around   the   evening   and   continues   through   the   night.   And   it's   (coughs)   continuous.   (coughs)  ",
+          "start_time": 56.74,
+          "end_time": 62.92
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay.   Is   it   related   to   taking   some   particular   food   or   something?  ",
+          "start_time": 62.92,
+          "end_time": 68.619
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "No,   ???  ",
+          "start_time": 68.619,
+          "end_time": 69.619
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Not   really.   Okay.  ",
+          "start_time": 69.619,
+          "end_time": 70.859
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Irritates   the...   (coughs)  ",
+          "start_time": 70.859,
+          "end_time": 72.739
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Or   when   you   start   speaking   like   that.  ",
+          "start_time": 72.739,
+          "end_time": 74.699
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Yes.   Then   I   start   speaking.   More   I   speak,   it   causes-  ",
+          "start_time": 74.699,
+          "end_time": 77.799
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "More,   okay.   Okay.   But,   uh,   i-is   there   any   problem   in...   Difficult   in   swallowing   or   not?  ",
+          "start_time": 77.799,
+          "end_time": 84.239
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "No.  ",
+          "start_time": 84.239,
+          "end_time": 84.76
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "No,   not   swallowing.   Any   breathing   difficulty?  ",
+          "start_time": 84.76,
+          "end_time": 88.02000000000001
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   feel   a   bit   breathless.",
+          "start_time": 88.02000000000001,
+          "end_time": 89.979
+        }
+      ],
+      "detected_speakers": [
+        "speaker_0",
+        "speaker_1"
+      ],
+      "start_overlap_stats": {
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 1.740000000000002,
+          "words": 7,
+          "segments": 1
+        },
+        "speaker_1": {
+          "speaker_id": "speaker_1",
+          "duration": 3.259999999999998,
+          "words": 15,
+          "segments": 1
+        }
+      },
+      "end_overlap_stats": {
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 3.0200000000000102,
+          "words": 6,
+          "segments": 1
+        },
+        "speaker_1": {
+          "speaker_id": "speaker_1",
+          "duration": 1.958999999999989,
+          "words": 5,
+          "segments": 1
+        }
+      },
+      "latency": 2.8665499687194824
+    },
+    {
+      "chunk_index": 3,
+      "segments": [
+        {
+          "speaker_id": "speaker_0",
+          "text": "Not   swallowing.   Any   breathing   difficulty?  ",
+          "start_time": 85.62,
+          "end_time": 88.0
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   feel   bit   breathless.   Um,   mostly   around   actually   like   in   the   afternoon   time,   11:00   or   3:00.  ",
+          "start_time": 88.0,
+          "end_time": 96.959
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Mm-hmm.  ",
+          "start_time": 96.959,
+          "end_time": 96.96000000000001
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   feel   very   tired   and-  ",
+          "start_time": 96.96000000000001,
+          "end_time": 98.319
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Mm-hmm.  ",
+          "start_time": 98.319,
+          "end_time": 98.719
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Breathless.   Feel   like   need   to   take   long   breaths.  ",
+          "start_time": 98.719,
+          "end_time": 102.899
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Mm-hmm,   mm-hmm.   Okay.   But   otherwise   you   are   comfortable,   no?   The   swallowing   and   all.   Do   you   feel   that   irritation   always?   Nothing   like   that?  ",
+          "start_time": 102.899,
+          "end_time": 112.7
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "(coughs)  ",
+          "start_time": 112.7,
+          "end_time": 112.819
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Only   in,   in   the   evening   you   feel   that   little   condition.   Okay.   Is   it   after   exposure   to   sudden   cold   or   something   like   that?",
+          "start_time": 112.819,
+          "end_time": 119.979
+        }
+      ],
+      "detected_speakers": [
+        "speaker_0",
+        "speaker_1"
+      ],
+      "start_overlap_stats": {
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 2.3799999999999955,
+          "words": 5,
+          "segments": 1
+        },
+        "speaker_1": {
+          "speaker_id": "speaker_1",
+          "duration": 2.0,
+          "words": 16,
+          "segments": 1
+        }
+      },
+      "end_overlap_stats": {
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 4.978999999999999,
+          "words": 22,
+          "segments": 1
+        }
+      },
+      "latency": 2.5793468952178955
+    },
+    {
+      "chunk_index": 4,
+      "segments": [
+        {
+          "speaker_id": "speaker_0",
+          "text": "Condition.   Is   it   after   exposure   to   sudden   cold   or   something   like   that?   Or   any   particular   food?   (coughs)  ",
+          "start_time": 115.059,
+          "end_time": 123.92
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   used   to   have   mango.   (coughs)   Raw   mango.   (coughs)   But   not   so   much   now.",
+          "start_time": 123.92,
+          "end_time": 128.5
+        }
+      ],
+      "detected_speakers": [
+        "speaker_0",
+        "speaker_1"
+      ],
+      "start_overlap_stats": {
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 4.9410000000000025,
+          "words": 17,
+          "segments": 1
+        }
+      },
+      "end_overlap_stats": {
+        "speaker_0": {
+          "speaker_id": "speaker_0",
+          "duration": 0.3999999999999915,
+          "words": 17,
+          "segments": 1
+        },
+        "speaker_1": {
+          "speaker_id": "speaker_1",
+          "duration": 4.579999999999998,
+          "words": 14,
+          "segments": 1
+        }
+      },
+      "latency": 1.9356968402862549
+    }
+  ],
+  "speaker_mappings": [
+    {
+      "from_chunk": 0,
+      "to_chunk": 1,
+      "mapping": {
+        "speaker_1": {
+          "maps_to": "speaker_0",
+          "confidence": 0.9942578124999997
+        },
+        "speaker_0": {
+          "maps_to": "speaker_1",
+          "confidence": 0.85
+        }
+      }
+    },
+    {
+      "from_chunk": 1,
+      "to_chunk": 2,
+      "mapping": {
+        "speaker_1": {
+          "maps_to": "speaker_0",
+          "confidence": 0.8525460122699393
+        },
+        "speaker_0": {
+          "maps_to": "speaker_1",
+          "confidence": 0.8187441424554841
+        }
+      }
+    },
+    {
+      "from_chunk": 2,
+      "to_chunk": 3,
+      "mapping": {
+        "speaker_0": {
+          "maps_to": "speaker_0",
+          "confidence": 0.8016556291390698
+        },
+        "speaker_1": {
+          "maps_to": "speaker_1",
+          "confidence": 0.7793999999999961
+        }
+      }
+    },
+    {
+      "from_chunk": 3,
+      "to_chunk": 4,
+      "mapping": {
+        "speaker_0": {
+          "maps_to": "speaker_0",
+          "confidence": 0.9264757435775717
+        }
+      }
+    }
+  ],
+  "global_speaker_map": {
+    "0_speaker_0": "speaker_0",
+    "0_speaker_1": "speaker_1",
+    "1_speaker_1": "speaker_0",
+    "1_speaker_0": "speaker_1",
+    "2_speaker_1": "speaker_1",
+    "2_speaker_0": "speaker_0",
+    "3_speaker_0": "speaker_0",
+    "3_speaker_1": "speaker_1",
+    "4_speaker_0": "speaker_0"
+  },
+  "speaker_roles": {
+    "speaker_0": "Doctor",
+    "speaker_1": "Patient"
+  },
+  "merged_segments": [
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Okay.   Uh,   good   evening.  ",
+      "start_time": 0.259,
+      "end_time": 3.519,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "Mm-hmm.  ",
+      "start_time": 3.519,
+      "end_time": 3.939,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Uh,   how   are   you?  ",
+      "start_time": 3.939,
+      "end_time": 5.279,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "I'm   fine.   (coughs)  ",
+      "start_time": 5.279,
+      "end_time": 6.119,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Uh.   How   are   you   doing?  ",
+      "start_time": 6.119,
+      "end_time": 8.659,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "(coughs)   Mostly   fine.  ",
+      "start_time": 8.659,
+      "end_time": 10.359,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Finally.  ",
+      "start_time": 10.359,
+      "end_time": 10.859,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "But   I'm   having   this   cough   problem   every   day.   Um,   (clears throat)   and   I'm   in   my   first   trimester,   eight   weeks.  ",
+      "start_time": 10.859,
+      "end_time": 18.859,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Mm,   mm,   hmm.   So,   did   you   have   fever?  ",
+      "start_time": 18.859,
+      "end_time": 22.859,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "I   had   fever   two   weeks   ago.   Very   high   fever.   And   the   fever   went   away.  ",
+      "start_time": 22.859,
+      "end_time": 27.44,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "Very   high   fever   and   fever   went   away.  ",
+      "start_time": 25.0,
+      "end_time": 27.44,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Okay.   Did   you   take   any   medicines   for   that?",
+      "start_time": 27.44,
+      "end_time": 29.979,
+      "chunk_index": 0
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Okay,   did   you   take   any   medicines   for   that?  ",
+      "start_time": 27.44,
+      "end_time": 30.059,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "I   took,   um,   antibiotic,   um,   Augmentin.  ",
+      "start_time": 30.059,
+      "end_time": 35.06,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Okay.   Then?  ",
+      "start_time": 35.06,
+      "end_time": 35.96,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "And   paracetamol.  ",
+      "start_time": 35.96,
+      "end_time": 37.219,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Okay.   Only   these   two   drugs,   no?   Nothing   else?   Okay.   Uh,   but   fever   subsided.  ",
+      "start_time": 37.219,
+      "end_time": 43.1,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "Fever   subsided.  ",
+      "start_time": 43.1,
+      "end_time": 43.84,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Okay.   But,   uh,   still   you   are   having   cough?  ",
+      "start_time": 43.84,
+      "end_time": 47.879999999999995,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "Yes,   cough-cough   has   been   there   for   like   more   than   two,   two   and   a   half   weeks   now.   Every   day.  ",
+      "start_time": 47.879999999999995,
+      "end_time": 53.5,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Is   it   whole   day   or   any   particular   time   of   the   day?  ",
+      "start_time": 53.5,
+      "end_time": 56.94,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "At   a   particular   time   of   the   day?  ",
+      "start_time": 55.0,
+      "end_time": 56.74,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "It   starts   around   the   evening   and   continues   through   the   night.   And   it's   (coughs)   continuous.   (coughs)  ",
+      "start_time": 56.74,
+      "end_time": 62.92,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "It   starts   around   the   evening   and   continues   till   night   and...",
+      "start_time": 56.94,
+      "end_time": 59.979,
+      "chunk_index": 1
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Okay.   Is   it   related   to   taking   some   particular   food   or   something?  ",
+      "start_time": 62.92,
+      "end_time": 68.619,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "No,   ???  ",
+      "start_time": 68.619,
+      "end_time": 69.619,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Not   really.   Okay.  ",
+      "start_time": 69.619,
+      "end_time": 70.859,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "Irritates   the...   (coughs)  ",
+      "start_time": 70.859,
+      "end_time": 72.739,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Or   when   you   start   speaking   like   that.  ",
+      "start_time": 72.739,
+      "end_time": 74.699,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "Yes.   Then   I   start   speaking.   More   I   speak,   it   causes-  ",
+      "start_time": 74.699,
+      "end_time": 77.799,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "More,   okay.   Okay.   But,   uh,   i-is   there   any   problem   in...   Difficult   in   swallowing   or   not?  ",
+      "start_time": 77.799,
+      "end_time": 84.239,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "No.  ",
+      "start_time": 84.239,
+      "end_time": 84.76,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "No,   not   swallowing.   Any   breathing   difficulty?  ",
+      "start_time": 84.76,
+      "end_time": 88.02000000000001,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Not   swallowing.   Any   breathing   difficulty?  ",
+      "start_time": 85.62,
+      "end_time": 88.0,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "I   feel   bit   breathless.   Um,   mostly   around   actually   like   in   the   afternoon   time,   11:00   or   3:00.  ",
+      "start_time": 88.0,
+      "end_time": 96.959,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "I   feel   a   bit   breathless.",
+      "start_time": 88.02000000000001,
+      "end_time": 89.979,
+      "chunk_index": 2
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Mm-hmm.  ",
+      "start_time": 96.959,
+      "end_time": 96.96000000000001,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "I   feel   very   tired   and-  ",
+      "start_time": 96.96000000000001,
+      "end_time": 98.319,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Mm-hmm.  ",
+      "start_time": 98.319,
+      "end_time": 98.719,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "Breathless.   Feel   like   need   to   take   long   breaths.  ",
+      "start_time": 98.719,
+      "end_time": 102.899,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Mm-hmm,   mm-hmm.   Okay.   But   otherwise   you   are   comfortable,   no?   The   swallowing   and   all.   Do   you   feel   that   irritation   always?   Nothing   like   that?  ",
+      "start_time": 102.899,
+      "end_time": 112.7,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "(coughs)  ",
+      "start_time": 112.7,
+      "end_time": 112.819,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Only   in,   in   the   evening   you   feel   that   little   condition.   Okay.   Is   it   after   exposure   to   sudden   cold   or   something   like   that?",
+      "start_time": 112.819,
+      "end_time": 119.979,
+      "chunk_index": 3
+    },
+    {
+      "speaker_id": "speaker_0",
+      "speaker_role": "Doctor",
+      "text": "Condition.   Is   it   after   exposure   to   sudden   cold   or   something   like   that?   Or   any   particular   food?   (coughs)  ",
+      "start_time": 115.059,
+      "end_time": 123.92,
+      "chunk_index": 4
+    },
+    {
+      "speaker_id": "speaker_1",
+      "speaker_role": "Patient",
+      "text": "I   used   to   have   mango.   (coughs)   Raw   mango.   (coughs)   But   not   so   much   now.",
+      "start_time": 123.92,
+      "end_time": 128.5,
+      "chunk_index": 4
+    }
+  ]
+}

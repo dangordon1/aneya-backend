@@ -1,0 +1,192 @@
+{
+  "chunks": [
+    {
+      "index": 0,
+      "start": 0,
+      "duration": 30,
+      "overlap_start": 20,
+      "overlap_end": 30,
+      "file_path": "./chunked_test_output/chunk-00.webm"
+    },
+    {
+      "index": 1,
+      "start": 20,
+      "duration": 30,
+      "overlap_start": 20,
+      "overlap_end": 30,
+      "file_path": "./chunked_test_output/chunk-01.webm"
+    }
+  ],
+  "results": [
+    {
+      "chunk_index": 0,
+      "segments": [
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay.   Uh,   good   evening.  ",
+          "start_time": 0.259,
+          "end_time": 3.519
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Mm-hmm.  ",
+          "start_time": 3.519,
+          "end_time": 3.939
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Uh,   how   are   you?  ",
+          "start_time": 3.939,
+          "end_time": 5.279
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I'm   fine.   (coughs)  ",
+          "start_time": 5.279,
+          "end_time": 6.119
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Uh.   How   are   you   doing?  ",
+          "start_time": 6.119,
+          "end_time": 8.659
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "(coughs)   Mostly   fine.  ",
+          "start_time": 8.659,
+          "end_time": 10.359
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Finally.  ",
+          "start_time": 10.359,
+          "end_time": 10.859
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "But   I'm   having   this   cough   problem   every   day.   Um,   (clears throat)   and   I'm   in   my   first   trimester,   eight   weeks.  ",
+          "start_time": 10.859,
+          "end_time": 18.859
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Mm,   mm,   hmm.   So,   did   you   have   fever?  ",
+          "start_time": 18.859,
+          "end_time": 22.859
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   had   fever   two   weeks   ago.   Very   high   fever.   And   the   fever   went   away.  ",
+          "start_time": 22.859,
+          "end_time": 27.44
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay.   Did   you   take   any   medicines   for   that?",
+          "start_time": 27.44,
+          "end_time": 29.979
+        }
+      ],
+      "detected_speakers": [
+        "speaker_0",
+        "speaker_1"
+      ],
+      "overlap_stats": {
+        "speaker_0": {
+          "duration": 5.398,
+          "words": 16,
+          "segments": 2
+        },
+        "speaker_1": {
+          "duration": 4.5809999999999995,
+          "words": 14,
+          "segments": 1
+        }
+      },
+      "latency": 4.311864852905273
+    },
+    {
+      "chunk_index": 1,
+      "segments": [
+        {
+          "speaker_id": "speaker_0",
+          "text": "So,   did   you   have   fever?  ",
+          "start_time": 0.119,
+          "end_time": 2.799
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   had   fever   two   weeks   ago.   Very   high   fever.   And   the   fever   went   away.  ",
+          "start_time": 2.799,
+          "end_time": 7.46
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay.   Did   you   take   any   medicines   for   that?  ",
+          "start_time": 7.46,
+          "end_time": 10.079
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "I   took,   um,   antibiotic,   um,   Augmentin.  ",
+          "start_time": 10.079,
+          "end_time": 15.06
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay,   then-  ",
+          "start_time": 15.06,
+          "end_time": 15.96
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "And   paracetamol.  ",
+          "start_time": 15.96,
+          "end_time": 17.279
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Okay,   only   these   two   drugs,   no?   Nothing   else?   Okay.   Uh,   but   fever   subsided?  ",
+          "start_time": 17.279,
+          "end_time": 23.1
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Fever   subsided.  ",
+          "start_time": 23.1,
+          "end_time": 23.84
+        },
+        {
+          "speaker_id": "speaker_0",
+          "text": "Right,   okay.   But   still   you   are   having   cough?  ",
+          "start_time": 23.84,
+          "end_time": 27.88
+        },
+        {
+          "speaker_id": "speaker_1",
+          "text": "Yes.   Cough-cough   began   for   like   more   than   ten   days,   ma'am.",
+          "start_time": 27.88,
+          "end_time": 29.979
+        }
+      ],
+      "detected_speakers": [
+        "speaker_0",
+        "speaker_1"
+      ],
+      "overlap_stats": {
+        "speaker_0": {
+          "duration": 7.140000000000001,
+          "words": 21,
+          "segments": 2
+        },
+        "speaker_1": {
+          "duration": 2.8389999999999986,
+          "words": 12,
+          "segments": 2
+        }
+      },
+      "latency": 2.582508087158203
+    }
+  ]
+}

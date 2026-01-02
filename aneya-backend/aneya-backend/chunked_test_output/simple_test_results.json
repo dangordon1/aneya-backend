@@ -1,0 +1,19 @@
+{
+  "chunks": [
+    {
+      "index": 0,
+      "start": 0,
+      "duration": 30,
+      "overlap_start": 20,
+      "overlap_end": 30
+    },
+    {
+      "index": 1,
+      "start": 20,
+      "duration": 30,
+      "overlap_start": 20,
+      "overlap_end": 30
+    }
+  ],
+  "results": []
+}

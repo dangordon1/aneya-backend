@@ -1,0 +1,45 @@
+   0.3s  Doctor       Okay.   Uh,   good   evening.  
+   3.5s  Patient      Mm-hmm.  
+   3.9s  Doctor       Uh,   how   are   you?  
+   5.3s  Patient      I'm   fine.   (coughs)  
+   6.1s  Doctor       Uh.   How   are   you   doing?  
+   8.7s  Patient      (coughs)   Mostly   fine.  
+  10.4s  Doctor       Finally.  
+  10.9s  Patient      But   I'm   having   this   cough   problem   every   day.   Um,   (clears throat)   and   I'm   in   my   first   trimester,   eight   weeks.  
+  18.9s  Doctor       Mm,   mm,   hmm.   So,   did   you   have   fever?  
+  22.9s  Patient      I   had   fever   two   weeks   ago.   Very   high   fever.   And   the   fever   went   away.  
+  25.0s  Patient      Very   high   fever   and   fever   went   away.  
+  27.4s  Doctor       Okay.   Did   you   take   any   medicines   for   that?
+  27.4s  Doctor       Okay,   did   you   take   any   medicines   for   that?  
+  30.1s  Patient      I   took,   um,   antibiotic,   um,   Augmentin.  
+  35.1s  Doctor       Okay.   Then?  
+  36.0s  Patient      And   paracetamol.  
+  37.2s  Doctor       Okay.   Only   these   two   drugs,   no?   Nothing   else?   Okay.   Uh,   but   fever   subsided.  
+  43.1s  Patient      Fever   subsided.  
+  43.8s  Doctor       Okay.   But,   uh,   still   you   are   having   cough?  
+  47.9s  Patient      Yes,   cough-cough   has   been   there   for   like   more   than   two,   two   and   a   half   weeks   now.   Every   day.  
+  53.5s  Doctor       Is   it   whole   day   or   any   particular   time   of   the   day?  
+  55.0s  Doctor       At   a   particular   time   of   the   day?  
+  56.7s  Patient      It   starts   around   the   evening   and   continues   through   the   night.   And   it's   (coughs)   continuous.   (coughs)  
+  56.9s  Patient      It   starts   around   the   evening   and   continues   till   night   and...
+  62.9s  Doctor       Okay.   Is   it   related   to   taking   some   particular   food   or   something?  
+  68.6s  Patient      No,   ???  
+  69.6s  Doctor       Not   really.   Okay.  
+  70.9s  Patient      Irritates   the...   (coughs)  
+  72.7s  Doctor       Or   when   you   start   speaking   like   that.  
+  74.7s  Patient      Yes.   Then   I   start   speaking.   More   I   speak,   it   causes-  
+  77.8s  Doctor       More,   okay.   Okay.   But,   uh,   i-is   there   any   problem   in...   Difficult   in   swallowing   or   not?  
+  84.2s  Patient      No.  
+  84.8s  Doctor       No,   not   swallowing.   Any   breathing   difficulty?  
+  85.6s  Doctor       Not   swallowing.   Any   breathing   difficulty?  
+  88.0s  Patient      I   feel   bit   breathless.   Um,   mostly   around   actually   like   in   the   afternoon   time,   11:00   or   3:00.  
+  88.0s  Patient      I   feel   a   bit   breathless.
+  97.0s  Doctor       Mm-hmm.  
+  97.0s  Patient      I   feel   very   tired   and-  
+  98.3s  Doctor       Mm-hmm.  
+  98.7s  Patient      Breathless.   Feel   like   need   to   take   long   breaths.  
+ 102.9s  Doctor       Mm-hmm,   mm-hmm.   Okay.   But   otherwise   you   are   comfortable,   no?   The   swallowing   and   all.   Do   you   feel   that   irritation   always?   Nothing   like   that?  
+ 112.7s  Patient      (coughs)  
+ 112.8s  Doctor       Only   in,   in   the   evening   you   feel   that   little   condition.   Okay.   Is   it   after   exposure   to   sudden   cold   or   something   like   that?
+ 115.1s  Doctor       Condition.   Is   it   after   exposure   to   sudden   cold   or   something   like   that?   Or   any   particular   food?   (coughs)  
+ 123.9s  Patient      I   used   to   have   mango.   (coughs)   Raw   mango.   (coughs)   But   not   so   much   now.

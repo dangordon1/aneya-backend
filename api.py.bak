@@ -15,7 +15,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 import sys
-import re
 import json
 import httpx
 import tempfile
@@ -1543,10 +1542,7 @@ async def diarize_audio_chunk(
     chunk_end: float = Form(30.0),
     num_speakers: Optional[int] = Form(None),
     diarization_threshold: float = Form(0.22),
-    language: Optional[str] = Form(None),
-    appointment_id: Optional[str] = Form(None),
-    patient_id: Optional[str] = Form(None),
-    appointment_type: Optional[str] = Form(None)
+    language: Optional[str] = Form(None)
 ):
     """
     Diarize audio chunk with overlap metadata for speaker ID matching
@@ -1699,22 +1695,6 @@ async def diarize_audio_chunk(
                 print(f"  📍 End overlap ({end_overlap_start:.1f}-{chunk_duration:.1f}s): ", end='')
                 print(', '.join([f"{sid}={st['duration']:.1f}s" for sid, st in end_overlap_stats.items()]))
 
-            # Determine form type from appointment_type if provided
-            form_type = None
-            form_updates = {}
-            form_confidence = {}
-
-            if appointment_type:
-                # Map appointment_type to form_type
-                if appointment_type == 'obgyn_infertility' or 'infertility' in appointment_type.lower():
-                    form_type = 'infertility'
-                elif appointment_type == 'obgyn_antenatal' or 'antenatal' in appointment_type.lower():
-                    form_type = 'antenatal'
-                elif appointment_type.startswith('obgyn_'):
-                    form_type = 'obgyn'
-
-                print(f"  📋 Determined form_type: {form_type} from appointment_type: {appointment_type}")
-
             return {
                 'success': True,
                 'chunk_index': chunk_index,
@@ -1725,10 +1705,7 @@ async def diarize_audio_chunk(
                 'start_overlap_stats': start_overlap_stats,
                 'end_overlap_stats': end_overlap_stats,
                 'latency_seconds': round(latency, 2),
-                'model': result_data.get('model', 'unknown'),
-                'form_type': form_type,
-                'form_updates': form_updates,
-                'form_confidence': form_confidence
+                'model': result_data.get('model', 'unknown')
             }
 
         finally:
@@ -2742,6 +2719,146 @@ async def update_appointment_status(
     }
 
 
+@app.get("/api/appointments/{appointment_id}/consultation-pdf")
+async def download_consultation_pdf(appointment_id: str):
+    """
+    Generate and download a PDF of the consultation form and appointment details.
+
+    Args:
+        appointment_id: UUID of the appointment
+
+    Returns:
+        StreamingResponse with PDF file
+
+    Raises:
+        400: Invalid appointment ID format
+        404: Appointment not found or no consultation form found
+        500: PDF generation failed
+    """
+    from pdf_generator import generate_consultation_pdf
+    import uuid
+    import traceback
+
+    try:
+        # Validate UUID format
+        try:
+            uuid.UUID(appointment_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid appointment ID format")
+
+        # Get Supabase client
+        supabase = get_supabase_client()
+
+        # Fetch appointment with patient and doctor data
+        print(f"📄 Fetching appointment data for PDF generation: {appointment_id}")
+
+        appointment_result = supabase.table("appointments")\
+            .select("*, patient:patients(*), doctor:doctors(*)")\
+            .eq("id", appointment_id)\
+            .execute()
+
+        if not appointment_result.data:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+
+        appointment = appointment_result.data[0]
+        patient = appointment['patient']
+
+        # Extract doctor info for PDF header (logo and clinic name)
+        doctor_info = None
+        if appointment.get('doctor'):
+            doctor_info = {
+                'clinic_name': appointment['doctor'].get('clinic_name'),
+                'clinic_logo_url': appointment['doctor'].get('clinic_logo_url')
+            }
+
+        # Try to find consultation form (check multiple tables)
+        form_data = None
+        form_type = None
+
+        # 1. Try consultation_form_forms first
+        form_result = supabase.table("consultation_form_forms")\
+            .select("*")\
+            .eq("appointment_id", appointment_id)\
+            .execute()
+
+        if form_result.data:
+            form_data = form_result.data[0]['consultation_form_data']
+            form_type = 'consultation_form'
+            print(f"✅ Found consultation_form data")
+        else:
+            # 2. Try obgyn_forms
+            form_result = supabase.table("obgyn_forms")\
+                .select("*")\
+                .eq("appointment_id", appointment_id)\
+                .execute()
+
+            if form_result.data:
+                form_data = form_result.data[0]['form_data']
+                form_type = 'obgyn'
+                print(f"✅ Found obgyn form data")
+            else:
+                # 3. Try infertility_forms
+                form_result = supabase.table("infertility_forms")\
+                    .select("*")\
+                    .eq("appointment_id", appointment_id)\
+                    .execute()
+
+                if form_result.data:
+                    form_data = form_result.data[0]['infertility_data']
+                    form_type = 'infertility'
+                    print(f"✅ Found infertility form data")
+                else:
+                    # 4. Try antenatal_forms
+                    form_result = supabase.table("antenatal_forms")\
+                        .select("*")\
+                        .eq("appointment_id", appointment_id)\
+                        .execute()
+
+                    if form_result.data:
+                        form_data = form_result.data[0]  # Antenatal has flat structure
+                        form_type = 'antenatal'
+                        print(f"✅ Found antenatal form data")
+
+        # If still no form data found, return 404
+        if not form_data:
+            raise HTTPException(
+                status_code=404,
+                detail="No consultation form found for this appointment"
+            )
+
+        # Generate PDF with doctor info for logo rendering
+        print(f"📄 Generating PDF for form type: {form_type}")
+        pdf_buffer = generate_consultation_pdf(
+            appointment=appointment,
+            patient=patient,
+            form_data=form_data,
+            form_type=form_type,
+            doctor_info=doctor_info  # Pass doctor info for logo/clinic name
+        )
+
+        # Create safe filename
+        patient_name = patient['name'].replace(' ', '_').replace('/', '_')
+        filename = f"consultation_{appointment_id[:8]}_{patient_name}.pdf"
+
+        print(f"✅ PDF generated successfully: {filename}")
+
+        # Return as streaming response
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating PDF: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
+
+
 # ============================================================================
 # SYMPTOM STRUCTURING ENDPOINT
 # ============================================================================
@@ -2805,6 +2922,7 @@ Respond with ONLY the JSON object, no other text."""
         response_text = response.content[0].text.strip()
 
         # Try to extract JSON from the response
+        import re
         json_match = re.search(r'\{[\s\S]*\}', response_text)
         if json_match:
             structured_data = json.loads(json_match.group())
@@ -4059,12 +4177,11 @@ Conversation:
 
 Classify this consultation:"""
 
-        # Create local Anthropic client for Claude API calls
-        import anthropic
-        anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        if not client:
+            raise HTTPException(status_code=500, detail="Claude client not initialized")
 
         # Use Claude Haiku for fast classification
-        message = anthropic_client.messages.create(
+        message = client.anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
             system=system_prompt,
@@ -4074,6 +4191,7 @@ Classify this consultation:"""
         response_text = message.content[0].text.strip()
 
         # Parse JSON response
+        import re
         json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
@@ -4133,7 +4251,7 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
     diarization and extracts relevant clinical data to auto-populate form fields.
     """
     try:
-        # ✨ NEW: Fetch schema from database instead of Python file
+        from mcp_servers.form_schemas import get_schema_for_form_type, build_extraction_prompt_hints
         from mcp_servers.field_validator import validate_multiple_fields, filter_by_confidence, exclude_existing_fields
         import time
 
@@ -4176,12 +4294,8 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
 
         conversation_text = "\n".join(conversation_lines)
 
-        # ✨ NEW: Fetch schema from database
-        schema = get_form_schema_from_db(request.form_type)
-        print(f"📊 Using schema from database for {request.form_type}")
-
-        # Get schema hints from database schema
-        schema_hints = build_extraction_prompt_hints_from_schema(schema)
+        # Get schema hints
+        schema_hints = build_extraction_prompt_hints(request.form_type)
 
         # Build Claude prompt for extraction
         system_prompt = f"""You are a medical data extraction specialist. Your task is to extract structured clinical data from a doctor-patient consultation dialogue.
@@ -4228,12 +4342,12 @@ Extract all relevant clinical data as JSON:
   }}
 }}"""
 
-        # Create local Anthropic client for Claude API calls
-        import anthropic
-        anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        # Call Claude Haiku for extraction (using existing client)
+        if not client:
+            raise HTTPException(status_code=500, detail="Claude client not initialized")
 
         # Use Claude to extract fields
-        message = anthropic_client.messages.create(
+        message = client.anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",  # Fast, cost-effective model
             max_tokens=2048,
             system=system_prompt,
@@ -4360,9 +4474,7 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 
         # Step 3: Check if form exists
         table_name = FORM_TABLE_MAP[consultation_type]
-        # Note: Select only 'id' to check existence, avoid schema cache issues
-        # We'll read full form data separately if needed
-        existing_form = supabase.table(table_name).select('id').eq(
+        existing_form = supabase.table(table_name).select('*').eq(
             'appointment_id', request.appointment_id
         ).execute()
 
@@ -4371,43 +4483,13 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         if existing_form.data and len(existing_form.data) > 0:
             # Form exists - update it
             form_id = existing_form.data[0]['id']
-            # Use empty state for first extraction to avoid schema cache issues
-            # Fields will be merged with existing data during update
-            current_form_state = {}
+            current_form_state = existing_form.data[0]
             print(f"📝 Found existing form: {form_id}")
         else:
             # Step 4: Create new form
             print(f"➕ Creating new {consultation_type} form...")
 
-            # Get Firebase UID from consultation.performed_by (doctor who performed the consultation)
-            # After migration, created_by is TEXT type and accepts Firebase UIDs directly
-            user_id = None
-            try:
-                consultation = supabase.table('consultations')\
-                    .select('performed_by')\
-                    .eq('id', request.consultation_id)\
-                    .single()\
-                    .execute()
-
-                if consultation.data and consultation.data.get('performed_by'):
-                    user_id = consultation.data['performed_by']
-                    print(f"✅ Using consultation.performed_by as created_by: {user_id[:8]}...")
-                else:
-                    print(f"⚠️  Consultation has no performed_by field")
-            except Exception as e:
-                print(f"⚠️  Failed to fetch consultation: {e}")
-
-            # Fallback: Try patient_snapshot.user_id
-            if not user_id:
-                user_id = request.patient_snapshot.get('user_id')
-                if user_id:
-                    print(f"✅ Using patient_snapshot.user_id as created_by: {user_id[:8]}...")
-
-            # Final fallback: Use system default if still no user_id
-            if not user_id:
-                user_id = '8c55534b-3c7a-436a-bb00-70dc6722439f'
-                print(f"⚠️  Using system default as created_by: {user_id[:8]}...")
-
+            user_id = request.patient_snapshot.get('user_id')  # None if not present
             default_data = get_default_form_data(
                 consultation_type,
                 request.appointment_id,
@@ -4440,54 +4522,18 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         # Step 6: Update form with extracted fields
         if field_updates:
             print(f"🔄 Updating form with {len(field_updates)} fields...")
-            print(f"   Fields to update: {list(field_updates.keys())}")
 
-            # Only update the extracted fields (not merge with existing state)
-            # This avoids schema cache issues with columns that don't exist
-            update_data = {**field_updates}
-
-            # Convert types for integer fields (PostgreSQL won't auto-cast "9.0" to integer)
-            # Antenatal form integer fields
-            integer_fields = ['gestational_age_weeks', 'gravida', 'para', 'live', 'abortions', 'cohabitation_period_months']
-            # OBGYN form integer fields
-            integer_fields += ['number_of_pregnancies', 'number_of_live_births', 'number_of_miscarriages',
-                              'number_of_abortions', 'cycle_length_days', 'menstrual_pain_severity',
-                              'contraception_satisfaction']
-            for field in integer_fields:
-                if field in update_data and update_data[field] is not None:
-                    try:
-                        # Convert "9.0" or "9" to integer 9
-                        update_data[field] = int(float(update_data[field]))
-                    except (ValueError, TypeError):
-                        # If conversion fails, remove the field to avoid DB error
-                        print(f"⚠️  Failed to convert {field}={update_data[field]} to integer, skipping")
-                        del update_data[field]
-
-            user_id = request.patient_snapshot.get('user_id')
+            user_id = request.patient_snapshot.get('user_id')  # None if not present
+            merged_data = {**current_form_state, **field_updates}
             if user_id:
-                update_data['updated_by'] = user_id
-            from datetime import timezone
-            update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
+                merged_data['updated_by'] = user_id
+            merged_data['updated_at'] = datetime.utcnow().isoformat()
 
-            try:
-                supabase.table(table_name).update(update_data).eq(
-                    'id', form_id
-                ).execute()
-                print(f"✅ Form updated successfully")
-            except Exception as e:
-                print(f"❌ Error updating form: {str(e)}")
-                # Don't fail the entire request if update fails
-                # The extraction was successful, just log the error
+            supabase.table(table_name).update(merged_data).eq(
+                'id', form_id
+            ).execute()
 
-        # Step 6b: Update consultation with detected_consultation_type
-        try:
-            supabase.table('consultations').update({
-                'detected_consultation_type': consultation_type
-            }).eq('id', request.consultation_id).execute()
-            print(f"✅ Updated consultation with detected type: {consultation_type}")
-        except Exception as e:
-            print(f"⚠️ Failed to update consultation detected_consultation_type: {e}")
-            # Don't fail the request if this update fails
+            print(f"✅ Form updated")
 
         # Step 7: Return success
         return AutoFillConsultationFormResponse(
@@ -4525,7 +4571,7 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 FORM_TABLE_MAP = {
     'obgyn': 'obgyn_consultation_forms',
     'infertility': 'infertility_consultation_forms',
-    'antenatal': 'antenatal_forms'
+    'antenatal': 'antenatal_master_cards'
 }
 
 def get_supabase_client():
@@ -4542,54 +4588,6 @@ def get_supabase_client():
         )
 
     return create_client(supabase_url, supabase_key)
-
-
-def get_form_schema_from_db(form_type: str) -> dict:
-    """
-    Fetch form schema from database instead of Python file.
-    Single source of truth for all form schemas.
-    """
-    try:
-        supabase = get_supabase_client()
-
-        result = supabase.table('form_schemas')\
-            .select('schema_definition, version')\
-            .eq('form_type', form_type)\
-            .eq('is_active', True)\
-            .single()\
-            .execute()
-
-        if not result.data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Schema not found for form_type: {form_type}"
-            )
-
-        return result.data['schema_definition']
-
-    except Exception as e:
-        print(f"❌ Error fetching schema for {form_type}: {e}")
-        # Fallback to Python file if database fetch fails
-        print(f"⚠️  Falling back to Python schema file")
-        from mcp_servers.form_schemas import get_schema_for_form_type
-        return get_schema_for_form_type(form_type)
-
-
-def build_extraction_prompt_hints_from_schema(schema: dict) -> str:
-    """
-    Build extraction hints from schema definition.
-    Works with database schemas or Python schemas.
-    """
-    hints = []
-
-    for field_name, field_def in schema.items():
-        if isinstance(field_def, dict) and 'extraction_hints' in field_def:
-            field_hints = field_def['extraction_hints']
-            if field_hints:
-                hints.append(f"- {field_name}: {', '.join(field_hints)}")
-
-    return '\n'.join(hints) if hints else "No specific extraction hints available"
-
 
 def get_default_form_data(form_type: str, appointment_id: str, patient_id: str, user_id: str = None):
     """Get default form data structure for new form creation."""
@@ -4624,6 +4622,7 @@ def parse_diarized_transcript(transcript: str) -> list:
     if not transcript:
         return segments
 
+    import re
     lines = transcript.split('\n')
 
     for line in lines:
@@ -5012,74 +5011,10 @@ async def get_feedback_stats(days: int = 30, feedback_type: Optional[str] = None
 
 
 # ============================================
-# SCHEMA ENDPOINTS
+# CUSTOM FORMS ROUTER
 # ============================================
-
-@app.get("/api/form-schema/{form_type}")
-async def get_form_schema(form_type: str):
-    """
-    Get form schema from database.
-
-    Returns the active schema definition for the specified form type.
-    Frontend uses this to render forms dynamically.
-
-    Path parameters:
-    - form_type: One of 'antenatal', 'obgyn', 'infertility', 'general'
-    """
-    try:
-        print(f"📊 Fetching schema for form_type: {form_type}")
-
-        # Validate form_type
-        valid_types = ['antenatal', 'obgyn', 'infertility', 'general']
-        if form_type not in valid_types:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid form_type: {form_type}. Must be one of: {', '.join(valid_types)}"
-            )
-
-        # Fetch from database
-        schema = get_form_schema_from_db(form_type)
-
-        return {
-            "form_type": form_type,
-            "schema": schema,
-            "fetched_at": time.time()
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error fetching schema: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/form-schemas")
-async def list_form_schemas():
-    """
-    List all available form schemas.
-
-    Returns metadata about all active form schemas in the system.
-    """
-    try:
-        supabase = get_supabase_client()
-
-        result = supabase.table('form_schemas')\
-            .select('id, form_type, specialty, version, description, is_active, updated_at')\
-            .eq('is_active', True)\
-            .execute()
-
-        return {
-            "schemas": result.data,
-            "count": len(result.data)
-        }
-
-    except Exception as e:
-        print(f"❌ Error listing schemas: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+from custom_forms_api import router as custom_forms_router
+app.include_router(custom_forms_router)
 
 
 if __name__ == "__main__":
