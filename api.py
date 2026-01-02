@@ -15,6 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 import sys
+import re
 import json
 import httpx
 import tempfile
@@ -1268,7 +1269,7 @@ Your response:"""
         start_time = time.time()
 
         response = anthropic_client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=100,
             temperature=0,
             messages=[{
@@ -1296,7 +1297,7 @@ Your response:"""
             "success": True,
             "role_mapping": role_mapping,
             "latency_seconds": round(latency, 2),
-            "model": "claude-3-5-haiku-20241022",
+            "model": "claude-haiku-4-5-20251001",
             "segments_analyzed": len(request.segments)
         }
 
@@ -1462,7 +1463,7 @@ OR
 Your response:"""
 
         response = anthropic_client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=100,
             temperature=0,
             messages=[{
@@ -1542,7 +1543,10 @@ async def diarize_audio_chunk(
     chunk_end: float = Form(30.0),
     num_speakers: Optional[int] = Form(None),
     diarization_threshold: float = Form(0.22),
-    language: Optional[str] = Form(None)
+    language: Optional[str] = Form(None),
+    appointment_id: Optional[str] = Form(None),
+    patient_id: Optional[str] = Form(None),
+    appointment_type: Optional[str] = Form(None)
 ):
     """
     Diarize audio chunk with overlap metadata for speaker ID matching
@@ -1695,6 +1699,22 @@ async def diarize_audio_chunk(
                 print(f"  📍 End overlap ({end_overlap_start:.1f}-{chunk_duration:.1f}s): ", end='')
                 print(', '.join([f"{sid}={st['duration']:.1f}s" for sid, st in end_overlap_stats.items()]))
 
+            # Determine form type from appointment_type if provided
+            form_type = None
+            form_updates = {}
+            form_confidence = {}
+
+            if appointment_type:
+                # Map appointment_type to form_type
+                if appointment_type == 'obgyn_infertility' or 'infertility' in appointment_type.lower():
+                    form_type = 'infertility'
+                elif appointment_type == 'obgyn_antenatal' or 'antenatal' in appointment_type.lower():
+                    form_type = 'antenatal'
+                elif appointment_type.startswith('obgyn_'):
+                    form_type = 'obgyn'
+
+                print(f"  📋 Determined form_type: {form_type} from appointment_type: {appointment_type}")
+
             return {
                 'success': True,
                 'chunk_index': chunk_index,
@@ -1705,7 +1725,10 @@ async def diarize_audio_chunk(
                 'start_overlap_stats': start_overlap_stats,
                 'end_overlap_stats': end_overlap_stats,
                 'latency_seconds': round(latency, 2),
-                'model': result_data.get('model', 'unknown')
+                'model': result_data.get('model', 'unknown'),
+                'form_type': form_type,
+                'form_updates': form_updates,
+                'form_confidence': form_confidence
             }
 
         finally:
@@ -2782,7 +2805,6 @@ Respond with ONLY the JSON object, no other text."""
         response_text = response.content[0].text.strip()
 
         # Try to extract JSON from the response
-        import re
         json_match = re.search(r'\{[\s\S]*\}', response_text)
         if json_match:
             structured_data = json.loads(json_match.group())
@@ -4037,12 +4059,13 @@ Conversation:
 
 Classify this consultation:"""
 
-        if not client:
-            raise HTTPException(status_code=500, detail="Claude client not initialized")
+        # Create local Anthropic client for Claude API calls
+        import anthropic
+        anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
         # Use Claude Haiku for fast classification
-        message = client.anthropic_client.messages.create(
-            model="claude-3-5-haiku-20241022",
+        message = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=512,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}]
@@ -4051,7 +4074,6 @@ Classify this consultation:"""
         response_text = message.content[0].text.strip()
 
         # Parse JSON response
-        import re
         json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
@@ -4202,13 +4224,13 @@ Extract all relevant clinical data as JSON:
   }}
 }}"""
 
-        # Call Claude Haiku for extraction (using existing client)
-        if not client:
-            raise HTTPException(status_code=500, detail="Claude client not initialized")
+        # Create local Anthropic client for Claude API calls
+        import anthropic
+        anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
         # Use Claude to extract fields
-        message = client.anthropic_client.messages.create(
-            model="claude-3-5-haiku-20241022",  # Fast, cost-effective model
+        message = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",  # Fast, cost-effective model
             max_tokens=2048,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}]
@@ -4334,7 +4356,9 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 
         # Step 3: Check if form exists
         table_name = FORM_TABLE_MAP[consultation_type]
-        existing_form = supabase.table(table_name).select('*').eq(
+        # Note: Select only 'id' to check existence, avoid schema cache issues
+        # We'll read full form data separately if needed
+        existing_form = supabase.table(table_name).select('id').eq(
             'appointment_id', request.appointment_id
         ).execute()
 
@@ -4343,13 +4367,43 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         if existing_form.data and len(existing_form.data) > 0:
             # Form exists - update it
             form_id = existing_form.data[0]['id']
-            current_form_state = existing_form.data[0]
+            # Use empty state for first extraction to avoid schema cache issues
+            # Fields will be merged with existing data during update
+            current_form_state = {}
             print(f"📝 Found existing form: {form_id}")
         else:
             # Step 4: Create new form
             print(f"➕ Creating new {consultation_type} form...")
 
-            user_id = request.patient_snapshot.get('user_id')  # None if not present
+            # Get Firebase UID from consultation.performed_by (doctor who performed the consultation)
+            # After migration, created_by is TEXT type and accepts Firebase UIDs directly
+            user_id = None
+            try:
+                consultation = supabase.table('consultations')\
+                    .select('performed_by')\
+                    .eq('id', request.consultation_id)\
+                    .single()\
+                    .execute()
+
+                if consultation.data and consultation.data.get('performed_by'):
+                    user_id = consultation.data['performed_by']
+                    print(f"✅ Using consultation.performed_by as created_by: {user_id[:8]}...")
+                else:
+                    print(f"⚠️  Consultation has no performed_by field")
+            except Exception as e:
+                print(f"⚠️  Failed to fetch consultation: {e}")
+
+            # Fallback: Try patient_snapshot.user_id
+            if not user_id:
+                user_id = request.patient_snapshot.get('user_id')
+                if user_id:
+                    print(f"✅ Using patient_snapshot.user_id as created_by: {user_id[:8]}...")
+
+            # Final fallback: Use system default if still no user_id
+            if not user_id:
+                user_id = '8c55534b-3c7a-436a-bb00-70dc6722439f'
+                print(f"⚠️  Using system default as created_by: {user_id[:8]}...")
+
             default_data = get_default_form_data(
                 consultation_type,
                 request.appointment_id,
@@ -4382,18 +4436,54 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         # Step 6: Update form with extracted fields
         if field_updates:
             print(f"🔄 Updating form with {len(field_updates)} fields...")
+            print(f"   Fields to update: {list(field_updates.keys())}")
 
-            user_id = request.patient_snapshot.get('user_id')  # None if not present
-            merged_data = {**current_form_state, **field_updates}
+            # Only update the extracted fields (not merge with existing state)
+            # This avoids schema cache issues with columns that don't exist
+            update_data = {**field_updates}
+
+            # Convert types for integer fields (PostgreSQL won't auto-cast "9.0" to integer)
+            # Antenatal form integer fields
+            integer_fields = ['gestational_age_weeks', 'gravida', 'para', 'live', 'abortions', 'cohabitation_period_months']
+            # OBGYN form integer fields
+            integer_fields += ['number_of_pregnancies', 'number_of_live_births', 'number_of_miscarriages',
+                              'number_of_abortions', 'cycle_length_days', 'menstrual_pain_severity',
+                              'contraception_satisfaction']
+            for field in integer_fields:
+                if field in update_data and update_data[field] is not None:
+                    try:
+                        # Convert "9.0" or "9" to integer 9
+                        update_data[field] = int(float(update_data[field]))
+                    except (ValueError, TypeError):
+                        # If conversion fails, remove the field to avoid DB error
+                        print(f"⚠️  Failed to convert {field}={update_data[field]} to integer, skipping")
+                        del update_data[field]
+
+            user_id = request.patient_snapshot.get('user_id')
             if user_id:
-                merged_data['updated_by'] = user_id
-            merged_data['updated_at'] = datetime.utcnow().isoformat()
+                update_data['updated_by'] = user_id
+            from datetime import timezone
+            update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
 
-            supabase.table(table_name).update(merged_data).eq(
-                'id', form_id
-            ).execute()
+            try:
+                supabase.table(table_name).update(update_data).eq(
+                    'id', form_id
+                ).execute()
+                print(f"✅ Form updated successfully")
+            except Exception as e:
+                print(f"❌ Error updating form: {str(e)}")
+                # Don't fail the entire request if update fails
+                # The extraction was successful, just log the error
 
-            print(f"✅ Form updated")
+        # Step 6b: Update consultation with detected_consultation_type
+        try:
+            supabase.table('consultations').update({
+                'detected_consultation_type': consultation_type
+            }).eq('id', request.consultation_id).execute()
+            print(f"✅ Updated consultation with detected type: {consultation_type}")
+        except Exception as e:
+            print(f"⚠️ Failed to update consultation detected_consultation_type: {e}")
+            # Don't fail the request if this update fails
 
         # Step 7: Return success
         return AutoFillConsultationFormResponse(
@@ -4431,7 +4521,7 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 FORM_TABLE_MAP = {
     'obgyn': 'obgyn_consultation_forms',
     'infertility': 'infertility_consultation_forms',
-    'antenatal': 'antenatal_master_cards'
+    'antenatal': 'antenatal_forms'
 }
 
 def get_supabase_client():
@@ -4482,7 +4572,6 @@ def parse_diarized_transcript(transcript: str) -> list:
     if not transcript:
         return segments
 
-    import re
     lines = transcript.split('\n')
 
     for line in lines:
