@@ -4536,16 +4536,25 @@ def get_supabase_client():
     return create_client(supabase_url, supabase_key)
 
 
-def get_form_schema_from_db(form_type: str) -> dict:
+def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict:
     """
     Fetch form schema from database instead of Python file.
     Single source of truth for all form schemas.
+
+    Args:
+        form_type: The form type to fetch (e.g., 'antenatal', 'obgyn')
+        full_metadata: If True, returns full metadata (title, description, version)
+                      If False, returns only schema_definition (default for backwards compatibility)
+
+    Returns:
+        dict: Schema definition or full metadata depending on full_metadata flag
     """
     try:
         supabase = get_supabase_client()
 
+        # Select all relevant fields
         result = supabase.table('form_schemas')\
-            .select('schema_definition, version')\
+            .select('schema_definition, version, description, form_type, specialty')\
             .eq('form_type', form_type)\
             .eq('is_active', True)\
             .single()\
@@ -4557,7 +4566,19 @@ def get_form_schema_from_db(form_type: str) -> dict:
                 detail=f"Schema not found for form_type: {form_type}"
             )
 
-        return result.data['schema_definition']
+        if full_metadata:
+            # Return all metadata for frontend
+            return {
+                'schema': result.data['schema_definition'],
+                'title': result.data.get('description', ''),  # Use description as title
+                'description': result.data.get('description', ''),
+                'version': result.data.get('version', '1.0'),
+                'form_type': result.data.get('form_type', ''),
+                'specialty': result.data.get('specialty', ''),
+            }
+        else:
+            # Return only schema definition (for extraction)
+            return result.data['schema_definition']
 
     except Exception as e:
         print(f"❌ Error fetching schema for {form_type}: {e}")
@@ -5000,25 +5021,19 @@ async def get_form_schema(form_type: str):
     Frontend uses this to render forms dynamically.
 
     Path parameters:
-    - form_type: One of 'antenatal', 'obgyn', 'infertility', 'general'
+    - form_type: Any form type registered in the database (e.g., 'antenatal', 'obgyn', 'infertility')
+
+    Note: No hardcoded validation - any form type in the database is valid.
+    This allows adding new form types without code changes.
     """
     try:
         print(f"📊 Fetching schema for form_type: {form_type}")
 
-        # Validate form_type
-        valid_types = ['antenatal', 'obgyn', 'infertility', 'general']
-        if form_type not in valid_types:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid form_type: {form_type}. Must be one of: {', '.join(valid_types)}"
-            )
-
-        # Fetch from database
-        schema = get_form_schema_from_db(form_type)
+        # Fetch from database with full metadata for frontend
+        schema_data = get_form_schema_from_db(form_type, full_metadata=True)
 
         return {
-            "form_type": form_type,
-            "schema": schema,
+            **schema_data,
             "fetched_at": time.time()
         }
 
@@ -5055,6 +5070,89 @@ async def list_form_schemas():
         print(f"❌ Error listing schemas: {str(e)}")
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# CONSULTATION FORM CRUD ENDPOINTS
+# ============================================
+
+@app.get("/api/consultation-form")
+async def get_consultation_form(appointment_id: str, form_type: str):
+    """
+    Get consultation form by appointment ID and form type.
+    """
+    try:
+        supabase = get_supabase_client()
+
+        result = supabase.table('consultation_forms')\
+            .select('*')\
+            .eq('appointment_id', appointment_id)\
+            .eq('form_type', form_type)\
+            .single()\
+            .execute()
+
+        if result.data:
+            return {"form": result.data}
+        else:
+            return {"form": None}
+
+    except Exception as e:
+        # Form doesn't exist yet - not an error
+        return {"form": None}
+
+
+@app.post("/api/consultation-form")
+async def create_consultation_form(form_data: dict):
+    """
+    Create a new consultation form in unified table.
+
+    Request body:
+    {
+        "patient_id": "uuid",
+        "appointment_id": "uuid",
+        "form_type": "antenatal|obgyn|infertility|...",
+        "form_data": {...},  // JSONB data
+        "status": "draft|partial|completed",
+        "created_by": "firebase_uid",
+        "updated_by": "firebase_uid",
+        "filled_by": "firebase_uid"
+    }
+    """
+    try:
+        supabase = get_supabase_client()
+
+        result = supabase.table('consultation_forms').insert(form_data).execute()
+
+        return {"form": result.data[0]}
+
+    except Exception as e:
+        print(f"❌ Error creating form: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/consultation-form/{form_id}")
+async def update_consultation_form(form_id: str, form_data: dict):
+    """
+    Update an existing consultation form.
+
+    Request body: Same as create, but only include fields to update.
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # Add updated_at timestamp
+        form_data['updated_at'] = datetime.now(timezone.utc).isoformat()
+
+        result = supabase.table('consultation_forms')\
+            .update(form_data)\
+            .eq('id', form_id)\
+            .execute()
+
+        return {"form": result.data[0]}
+
+    except Exception as e:
+        print(f"❌ Error updating form: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
