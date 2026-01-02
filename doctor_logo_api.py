@@ -5,7 +5,7 @@ Endpoints for uploading, managing, and deleting clinic logos for doctors.
 Logos are stored in Google Cloud Storage and URLs are saved to the doctors table.
 """
 
-from fastapi import APIRouter, UploadFile, File, Query, HTTPException
+from fastapi import APIRouter, UploadFile, File, Query, HTTPException, Header
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -25,6 +25,43 @@ MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB
 TARGET_WIDTH = 200
 TARGET_HEIGHT = 80
 ALLOWED_MIME_TYPES = ["image/png", "image/jpeg", "image/jpg"]
+
+
+def verify_firebase_token_and_get_client(authorization: str):
+    """
+    Verify Firebase JWT token and return Supabase client with service key
+
+    Args:
+        authorization: Authorization header value (e.g., "Bearer <token>")
+
+    Returns:
+        tuple: (supabase_client, user_id from Firebase token)
+    """
+    from api import get_supabase_client
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth
+
+    # Extract JWT token from Authorization header
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+
+    firebase_token = authorization.replace("Bearer ", "")
+
+    try:
+        # Verify Firebase JWT token
+        decoded_token = firebase_auth.verify_id_token(firebase_token)
+        user_id = decoded_token['uid']
+
+        print(f"✅ Verified Firebase token for user: {user_id}")
+
+        # Get Supabase client with service key (bypasses RLS)
+        supabase = get_supabase_client()
+
+        return supabase, user_id
+
+    except Exception as e:
+        print(f"❌ Firebase token verification failed: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Invalid or expired token: {str(e)}")
 
 
 class LogoUploadResponse(BaseModel):
@@ -126,11 +163,12 @@ def process_logo_image(file_bytes: bytes, filename: str) -> tuple[bytes, str]:
         raise ValueError(f"Failed to process image: {str(e)}")
 
 
-async def upload_logo_to_supabase(doctor_id: str, image_bytes: bytes, ext: str) -> str:
+async def upload_logo_to_supabase(supabase, doctor_id: str, image_bytes: bytes, ext: str) -> str:
     """
     Upload logo to Supabase Storage
 
     Args:
+        supabase: Authenticated Supabase client
         doctor_id: Doctor's UUID
         image_bytes: Processed image bytes
         ext: File extension (.png or .jpg)
@@ -138,8 +176,6 @@ async def upload_logo_to_supabase(doctor_id: str, image_bytes: bytes, ext: str) 
     Returns:
         str: Public URL of uploaded image
     """
-    from api import get_supabase_client
-
     try:
         # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -147,9 +183,6 @@ async def upload_logo_to_supabase(doctor_id: str, image_bytes: bytes, ext: str) 
         filename = f"{doctor_id}/logo_{timestamp}_{unique_id}{ext}"
 
         print(f"📤 Uploading logo to Supabase Storage: {filename}")
-
-        # Get Supabase client
-        supabase = get_supabase_client()
 
         # Upload to Supabase Storage
         content_type = "image/png" if ext == '.png' else "image/jpeg"
@@ -171,15 +204,14 @@ async def upload_logo_to_supabase(doctor_id: str, image_bytes: bytes, ext: str) 
         raise Exception(f"Failed to upload to Supabase Storage: {str(e)}")
 
 
-async def delete_logo_from_supabase(logo_url: str):
+async def delete_logo_from_supabase(supabase, logo_url: str):
     """
     Delete logo from Supabase Storage
 
     Args:
+        supabase: Authenticated Supabase client
         logo_url: Public URL of the logo to delete
     """
-    from api import get_supabase_client
-
     try:
         # Extract filename from Supabase Storage URL
         # Format: https://{project}.supabase.co/storage/v1/object/public/clinic-logos/{path}
@@ -188,8 +220,6 @@ async def delete_logo_from_supabase(logo_url: str):
             filename = logo_url.split("/clinic-logos/")[1]
 
             print(f"🗑️  Deleting logo from Supabase Storage: {filename}")
-
-            supabase = get_supabase_client()
 
             # Delete from Supabase Storage
             result = supabase.storage.from_('clinic-logos').remove([filename])
@@ -206,19 +236,19 @@ async def delete_logo_from_supabase(logo_url: str):
 @router.post("/api/doctor-logo/upload", response_model=LogoUploadResponse)
 async def upload_clinic_logo(
     file: UploadFile = File(...),
-    doctor_id: str = Query(..., description="Doctor's UUID")
+    doctor_id: str = Query(..., description="Doctor's UUID"),
+    authorization: str = Header(..., description="Bearer token")
 ):
     """
     Upload and process clinic logo for a doctor
 
     - Validates file type (PNG, JPEG) and size (max 2MB)
     - Resizes to fit within 200x80px
-    - Uploads to GCS
+    - Uploads to Supabase Storage
     - Updates doctor record in Supabase
     - Deletes old logo if exists
+    - Requires JWT authentication
     """
-    from api import get_supabase_client
-
     try:
         # Read file
         file_bytes = await file.read()
@@ -228,23 +258,29 @@ async def upload_clinic_logo(
         if not is_valid:
             raise HTTPException(status_code=400, detail=error_msg)
 
-        # Get Supabase client
-        supabase = get_supabase_client()
+        # Verify Firebase token and get Supabase client
+        supabase, user_id = verify_firebase_token_and_get_client(authorization)
 
-        # Check if doctor exists and get current logo URL
-        doctor_result = supabase.table("doctors").select("clinic_logo_url").eq("id", doctor_id).execute()
+        # Check if doctor exists and verify ownership
+        doctor_result = supabase.table("doctors").select("clinic_logo_url, user_id").eq("id", doctor_id).execute()
 
         if not doctor_result.data:
             raise HTTPException(status_code=404, detail="Doctor not found")
 
-        old_logo_url = doctor_result.data[0].get('clinic_logo_url')
+        doctor_data = doctor_result.data[0]
+
+        # Verify that the authenticated user owns this doctor record
+        if doctor_data.get('user_id') != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized: You can only upload logos for your own account")
+
+        old_logo_url = doctor_data.get('clinic_logo_url')
 
         # Process image
         print(f"🖼️  Processing logo for doctor {doctor_id}")
         processed_bytes, ext = process_logo_image(file_bytes, file.filename or "logo")
 
         # Upload to Supabase Storage
-        public_url = await upload_logo_to_supabase(doctor_id, processed_bytes, ext)
+        public_url = await upload_logo_to_supabase(supabase, doctor_id, processed_bytes, ext)
 
         # Update doctor record
         update_result = supabase.table("doctors").update({
@@ -257,7 +293,7 @@ async def upload_clinic_logo(
 
         # Delete old logo from Supabase Storage (if exists)
         if old_logo_url:
-            await delete_logo_from_supabase(old_logo_url)
+            await delete_logo_from_supabase(supabase, old_logo_url)
 
         return LogoUploadResponse(
             success=True,
@@ -278,27 +314,33 @@ async def upload_clinic_logo(
 
 @router.delete("/api/doctor-logo/delete", response_model=LogoDeleteResponse)
 async def delete_clinic_logo(
-    doctor_id: str = Query(..., description="Doctor's UUID")
+    doctor_id: str = Query(..., description="Doctor's UUID"),
+    authorization: str = Header(..., description="Bearer token")
 ):
     """
     Delete clinic logo for a doctor
 
-    - Deletes logo from GCS
+    - Deletes logo from Supabase Storage
     - Sets clinic_logo_url to NULL in Supabase
+    - Requires JWT authentication
     """
-    from api import get_supabase_client
-
     try:
-        # Get Supabase client
-        supabase = get_supabase_client()
+        # Verify Firebase token and get Supabase client
+        supabase, user_id = verify_firebase_token_and_get_client(authorization)
 
-        # Get current logo URL
-        doctor_result = supabase.table("doctors").select("clinic_logo_url").eq("id", doctor_id).execute()
+        # Get doctor and verify ownership
+        doctor_result = supabase.table("doctors").select("clinic_logo_url, user_id").eq("id", doctor_id).execute()
 
         if not doctor_result.data:
             raise HTTPException(status_code=404, detail="Doctor not found")
 
-        logo_url = doctor_result.data[0].get('clinic_logo_url')
+        doctor_data = doctor_result.data[0]
+
+        # Verify that the authenticated user owns this doctor record
+        if doctor_data.get('user_id') != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized: You can only delete logos for your own account")
+
+        logo_url = doctor_data.get('clinic_logo_url')
 
         if not logo_url:
             return LogoDeleteResponse(
@@ -307,7 +349,7 @@ async def delete_clinic_logo(
             )
 
         # Delete from Supabase Storage
-        await delete_logo_from_supabase(logo_url)
+        await delete_logo_from_supabase(supabase, logo_url)
 
         # Update doctor record
         update_result = supabase.table("doctors").update({
@@ -334,24 +376,30 @@ async def delete_clinic_logo(
 
 @router.get("/api/doctor-logo/current", response_model=LogoCurrentResponse)
 async def get_current_logo(
-    doctor_id: str = Query(..., description="Doctor's UUID")
+    doctor_id: str = Query(..., description="Doctor's UUID"),
+    authorization: str = Header(..., description="Bearer token")
 ):
     """
     Get current clinic logo URL for a doctor
+    Requires JWT authentication
     """
-    from api import get_supabase_client
-
     try:
-        # Get Supabase client
-        supabase = get_supabase_client()
+        # Verify Firebase token and get Supabase client
+        supabase, user_id = verify_firebase_token_and_get_client(authorization)
 
-        # Get logo URL
-        doctor_result = supabase.table("doctors").select("clinic_logo_url").eq("id", doctor_id).execute()
+        # Get doctor and verify ownership
+        doctor_result = supabase.table("doctors").select("clinic_logo_url, user_id").eq("id", doctor_id).execute()
 
         if not doctor_result.data:
             raise HTTPException(status_code=404, detail="Doctor not found")
 
-        logo_url = doctor_result.data[0].get('clinic_logo_url')
+        doctor_data = doctor_result.data[0]
+
+        # Verify that the authenticated user owns this doctor record
+        if doctor_data.get('user_id') != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized: You can only access logos for your own account")
+
+        logo_url = doctor_data.get('clinic_logo_url')
 
         return LogoCurrentResponse(clinic_logo_url=logo_url)
 
