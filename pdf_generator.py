@@ -395,3 +395,222 @@ def generate_consultation_pdf(
     c.save()
     buffer.seek(0)
     return buffer
+
+
+def render_custom_form_section(
+    c: canvas.Canvas,
+    section_config: Dict[str, Any],
+    form_data: Dict[str, Any],
+    y: float
+) -> float:
+    """
+    Render a custom form section using pdf_template configuration.
+
+    Args:
+        c: ReportLab canvas
+        section_config: PDF template section configuration
+        form_data: Actual form data (JSONB)
+        y: Current Y position
+
+    Returns:
+        float: Updated Y position
+    """
+    width, height = A4
+
+    # Get section ID and title
+    section_id = section_config.get('id', '')
+    section_title = section_config.get('title', format_field_label(section_id))
+    layout = section_config.get('layout', 'single_column')
+
+    # Render section header
+    y = render_section_header(c, section_title, y)
+
+    # Get fields for this section
+    fields = section_config.get('fields', [])
+
+    # Render fields based on layout
+    if layout == 'two_column':
+        # Two column layout
+        col_width = 8.5*cm
+        left_x = 2*cm
+        right_x = 11*cm
+        row_height = 0.5*cm
+
+        for i, field_config in enumerate(fields):
+            field_name = field_config.get('field_name', '')
+            label = field_config.get('label', format_field_label(field_name))
+
+            # Get value from form_data
+            value = form_data.get(section_id, {}).get(field_name, '')
+
+            # Skip empty fields
+            if value is None or value == '' or value == []:
+                continue
+
+            # Determine column
+            column = field_config.get('position', {}).get('column', 1)
+            x_offset = left_x if column == 1 else right_x
+
+            # Check for page break
+            if y < 3*cm:
+                c.showPage()
+                y = height - 2*cm
+                y = render_section_header(c, f"{section_title} - Continued", y)
+
+            # Render field
+            y = render_field(c, label, value, y, x_offset=x_offset)
+
+    elif layout == 'three_column':
+        # Three column layout
+        col_width = 5.5*cm
+        col1_x = 2*cm
+        col2_x = 7.8*cm
+        col3_x = 13.6*cm
+
+        for field_config in fields:
+            field_name = field_config.get('field_name', '')
+            label = field_config.get('label', format_field_label(field_name))
+
+            # Get value from form_data
+            value = form_data.get(section_id, {}).get(field_name, '')
+
+            # Skip empty fields
+            if value is None or value == '' or value == []:
+                continue
+
+            # Determine column
+            column = field_config.get('position', {}).get('column', 1)
+            if column == 1:
+                x_offset = col1_x
+            elif column == 2:
+                x_offset = col2_x
+            else:
+                x_offset = col3_x
+
+            # Check for page break
+            if y < 3*cm:
+                c.showPage()
+                y = height - 2*cm
+                y = render_section_header(c, f"{section_title} - Continued", y)
+
+            # Render field
+            y = render_field(c, label, value, y, x_offset=x_offset)
+
+    else:
+        # Single column layout (default)
+        for field_config in fields:
+            field_name = field_config.get('field_name', '')
+            label = field_config.get('label', format_field_label(field_name))
+
+            # Get value from form_data
+            value = form_data.get(section_id, {}).get(field_name, '')
+
+            # Skip empty fields
+            if value is None or value == '' or value == []:
+                continue
+
+            # Check for page break
+            if y < 3*cm:
+                c.showPage()
+                y = height - 2*cm
+                y = render_section_header(c, f"{section_title} - Continued", y)
+
+            # Render field
+            y = render_field(c, label, value, y)
+
+    y -= 0.6*cm
+    return y
+
+
+def generate_custom_form_pdf(
+    form_data: Dict[str, Any],
+    pdf_template: Dict[str, Any],
+    form_name: str,
+    specialty: str,
+    patient: Optional[Dict[str, Any]] = None,
+    doctor_info: Optional[Dict[str, Any]] = None
+) -> BytesIO:
+    """
+    Generate a PDF for a custom form using stored pdf_template.
+
+    Args:
+        form_data: Filled form data (JSONB from filled_forms table)
+        pdf_template: PDF layout template (JSONB from custom_forms table)
+        form_name: Name of the form
+        specialty: Medical specialty
+        patient: Optional patient information
+        doctor_info: Optional dict with clinic_name and clinic_logo_url
+
+    Returns:
+        BytesIO containing PDF bytes
+    """
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    # Track Y position
+    y = height - 2*cm
+
+    # Get page config
+    page_config = pdf_template.get('page_config', {})
+    header_config = page_config.get('header', {})
+
+    # Render header
+    if header_config.get('show_logo') or header_config.get('show_clinic_name'):
+        y = render_header(c, y, doctor_info)
+    else:
+        # Simple header with form title
+        c.setFillColor(ANEYA_NAVY)
+        c.setFont("Helvetica-Bold", 20)
+        form_title = header_config.get('title', format_field_label(form_name))
+        c.drawCentredString(width/2, y, form_title)
+        y -= 0.5*cm
+
+        # Specialty subtitle
+        c.setFillColor(ANEYA_GRAY)
+        c.setFont("Helvetica", 12)
+        c.drawCentredString(width/2, y, f"Specialty: {specialty.title()}")
+        y -= 0.5*cm
+
+        # Generation date
+        c.setFont("Helvetica", 10)
+        generation_date = datetime.now().strftime('%d %B %Y at %H:%M')
+        c.drawCentredString(width/2, y, f"Generated: {generation_date}")
+        y -= 1.5*cm
+
+    # Render patient section if provided
+    if patient:
+        if y < 8*cm:
+            c.showPage()
+            y = height - 2*cm
+
+        y = render_patient_section(c, patient, y)
+
+    # Render form sections using template
+    sections = pdf_template.get('sections', [])
+
+    for section_config in sections:
+        # Check for page break before section
+        if section_config.get('page_break_before', False):
+            c.showPage()
+            y = height - 2*cm
+
+        # Check if need new page
+        if y < 8*cm:
+            c.showPage()
+            y = height - 2*cm
+
+        # Render section
+        y = render_custom_form_section(c, section_config, form_data, y)
+
+    # Add footer if configured
+    footer_config = page_config.get('footer', {})
+    if footer_config.get('show_page_numbers') or footer_config.get('show_timestamp'):
+        c.setFillColor(ANEYA_LIGHT_GRAY)
+        c.setFont("Helvetica", 8)
+        c.drawCentredString(width/2, 1.5*cm, "Aneya Healthcare Platform")
+        c.drawCentredString(width/2, 1*cm, "This document is confidential and for medical professionals only")
+
+    c.save()
+    buffer.seek(0)
+    return buffer

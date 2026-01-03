@@ -21,6 +21,7 @@ class FormAnalysis:
     """Structured form analysis result"""
     form_name: str
     sections: List[Dict[str, Any]]
+    pdf_template: Dict[str, Any]  # PDF layout configuration
     metadata: Dict[str, Any]
 
 
@@ -35,7 +36,7 @@ class ImageAnalyzer:
             api_key: Anthropic API key. If None, uses ANTHROPIC_API_KEY env var.
         """
         self.client = Anthropic(api_key=api_key)
-        self.model = "claude-sonnet-4-5-20250929"
+        self.model = "claude-opus-4-5-20251101"  # Using Opus 4.5 for comprehensive extraction
 
     def convert_heic_to_jpeg(self, heic_path: str, output_dir: Optional[str] = None, max_size_mb: float = 4.5) -> str:
         """
@@ -350,15 +351,148 @@ Return ONLY the JSON object, no additional text. If you don't find specific rela
 
         return json.loads(response_text)
 
+    def analyze_form_comprehensive(self, image_paths: List[str]) -> Dict[str, Any]:
+        """
+        Single-call comprehensive analysis using Opus 4.5.
+        Extracts both form schema and PDF layout template in one request.
+
+        Args:
+            image_paths: All form images (2-10 JPEG images)
+
+        Returns:
+            Dict with 'form_structure' and 'pdf_template' keys
+        """
+        import json
+
+        # Build image content for ALL images
+        image_content = []
+        for img_path in image_paths:
+            img_base64 = self.encode_image_base64(img_path)
+            image_content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": img_base64
+                }
+            })
+
+        # Comprehensive prompt for both schema and PDF layout
+        prompt = """Analyze these medical form images to extract BOTH:
+
+1. **Form Data Schema**: Sections, fields, types, validation rules
+2. **PDF Layout Template**: Visual layout matching the original form design
+
+Return a JSON object with this exact structure:
+
+{
+  "form_structure": {
+    "form_name": "suggested_form_name",
+    "description": "Brief description",
+    "sections": [
+      {
+        "name": "section_name_in_snake_case",
+        "description": "What this section captures",
+        "order": 1,
+        "fields": [
+          {
+            "name": "field_name_in_snake_case",
+            "label": "Human Readable Label",
+            "type": "string|number|boolean|date|object",
+            "input_type": "text_short|textarea|number|date|checkbox|radio|dropdown",
+            "required": true/false,
+            "unit": "mmHg|kg|cm|years (for numeric fields)",
+            "range": [min, max],
+            "description": "What this field captures"
+          }
+        ]
+      }
+    ]
+  },
+  "pdf_template": {
+    "page_config": {
+      "size": "A4",
+      "margins": {"top": 40, "bottom": 40, "left": 50, "right": 50},
+      "header": {
+        "show_logo": true,
+        "show_clinic_name": true,
+        "title": "Form Title"
+      },
+      "footer": {
+        "show_page_numbers": true,
+        "show_timestamp": true
+      }
+    },
+    "sections": [
+      {
+        "id": "section_name",
+        "title": "Section Title",
+        "layout": "single_column|two_column|three_column",
+        "page_break_before": false,
+        "fields": [
+          {
+            "field_name": "field_name",
+            "label": "Field Label",
+            "position": {"column": 1, "row": 1, "order": 1},
+            "style": {
+              "font_size": 10,
+              "bold": false,
+              "width": 100
+            }
+          }
+        ]
+      }
+    ],
+    "styling": {
+      "primary_color": "#0c3555",
+      "accent_color": "#1d9e99",
+      "section_header_size": 12,
+      "field_label_size": 9,
+      "field_value_size": 10
+    }
+  }
+}
+
+**CRITICAL**:
+- Match the PDF layout to the VISUAL STRUCTURE of the original form
+- Preserve the field positioning and column layout from the paper form
+- Use the same section ordering as the original form
+- Return ONLY valid JSON, no additional text
+
+Use Aneya color scheme: Navy #0c3555, Teal #1d9e99"""
+
+        # Call Opus 4.5
+        print("\n🤖 Calling Claude Opus 4.5 for comprehensive analysis...")
+        message = self.client.messages.create(
+            model=self.model,  # claude-opus-4-5-20251101
+            max_tokens=16000,  # Larger for comprehensive response
+            messages=[{
+                "role": "user",
+                "content": image_content + [{"type": "text", "text": prompt}]
+            }]
+        )
+
+        # Parse response
+        response_text = message.content[0].text
+
+        # Extract JSON from response (handle markdown code blocks)
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+
+        return json.loads(response_text)
+
     def analyze_images(self, heic_paths: List[str]) -> FormAnalysis:
         """
-        Complete multi-stage analysis of form images.
+        Complete comprehensive analysis of form images using Opus 4.5.
+        Extracts both form schema and PDF layout template.
 
         Args:
             heic_paths: List of paths to HEIC images
 
         Returns:
-            FormAnalysis object with complete analysis results
+            FormAnalysis object with complete analysis results including PDF template
         """
         # Step 1: Convert HEIC to JPEG
         print("Converting HEIC images to JPEG...")
@@ -374,33 +508,31 @@ Return ONLY the JSON object, no additional text. If you don't find specific rela
         if not jpeg_paths:
             raise ValueError("No images were successfully converted")
 
-        # Step 2: Analyze form structure
-        print("\nAnalyzing form structure...")
-        structure = self.analyze_form_structure(jpeg_paths)
-        print(f"  ✓ Identified {len(structure['sections'])} sections")
+        # Step 2: Comprehensive analysis with Opus 4.5
+        print(f"\n🔍 Analyzing {len(jpeg_paths)} images with Claude Opus 4.5...")
+        comprehensive_result = self.analyze_form_comprehensive(jpeg_paths)
 
-        # Step 3: Analyze field details
-        print("\nAnalyzing field details...")
-        field_data = self.analyze_field_details(jpeg_paths, structure['sections'])
-        print(f"  ✓ Extracted {len(field_data['fields'])} fields")
+        form_structure = comprehensive_result['form_structure']
+        pdf_template = comprehensive_result['pdf_template']
 
-        # Step 4: Analyze relationships (if enough images)
-        relationships = {"relationships": [], "validation_notes": []}
-        if len(jpeg_paths) >= 5:
-            print("\nAnalyzing validation rules and relationships...")
-            relationships = self.analyze_validation_and_relationships(jpeg_paths, field_data['fields'])
-            print(f"  ✓ Found {len(relationships['relationships'])} relationships")
+        # Extract sections and count fields
+        sections = form_structure['sections']
+        total_fields = sum(len(section.get('fields', [])) for section in sections)
+
+        print(f"  ✓ Extracted {len(sections)} sections with {total_fields} fields")
+        print(f"  ✓ Generated PDF template with {len(pdf_template.get('sections', []))} layout sections")
 
         # Combine results
         return FormAnalysis(
-            form_name=structure['form_name'],
-            sections=self._organize_fields_by_section(structure['sections'], field_data['fields']),
+            form_name=form_structure['form_name'],
+            sections=sections,
+            pdf_template=pdf_template,
             metadata={
-                "description": structure.get('description', ''),
-                "relationships": relationships['relationships'],
-                "validation_notes": relationships['validation_notes'],
-                "total_fields": len(field_data['fields']),
-                "image_count": len(jpeg_paths)
+                "description": form_structure.get('description', ''),
+                "total_fields": total_fields,
+                "section_count": len(sections),
+                "image_count": len(jpeg_paths),
+                "model_used": "claude-opus-4-5-20251101"
             }
         )
 

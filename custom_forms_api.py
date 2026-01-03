@@ -55,6 +55,27 @@ class FormConversionStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
+class FormExtractionResponse(BaseModel):
+    """Response for initial extraction (before review)"""
+    success: bool
+    form_name: str
+    specialty: str
+    schema: Dict[str, Any]  # Extracted form schema (sections + fields)
+    pdf_template: Dict[str, Any]  # Extracted PDF layout
+    metadata: Dict[str, Any]  # Field counts, image count, etc.
+    error: Optional[str] = None
+
+
+class SaveFormRequest(BaseModel):
+    """Request body for saving reviewed form"""
+    form_name: str
+    specialty: str
+    schema: Dict[str, Any]
+    pdf_template: Dict[str, Any]
+    description: Optional[str] = None
+    is_public: bool = False
+
+
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
@@ -70,7 +91,7 @@ def get_current_user_id() -> Optional[str]:
 # ENDPOINTS
 # ============================================
 
-@router.post("/upload", response_model=FormConversionStatusResponse)
+@router.post("/upload", response_model=FormExtractionResponse)
 async def upload_custom_form(
     form_name: str = Form(...),
     specialty: str = Form(...),
@@ -79,7 +100,8 @@ async def upload_custom_form(
     files: List[UploadFile] = File(...)
 ):
     """
-    Upload form images and convert to custom form schema.
+    Upload form images and extract schema + PDF template for review.
+    DOES NOT save to database - returns extraction results for doctor to review.
 
     Args:
         form_name: Name for the form in snake_case
@@ -89,7 +111,7 @@ async def upload_custom_form(
         files: List of HEIC/JPEG/PNG image files
 
     Returns:
-        Conversion status with form ID if successful
+        Extraction results with schema and PDF template for review
     """
     try:
         user_id = get_current_user_id()
@@ -139,35 +161,94 @@ async def upload_custom_form(
         )
 
         if not result.success:
-            return FormConversionStatusResponse(
+            return FormExtractionResponse(
                 success=False,
                 form_name=form_name,
                 specialty=specialty,
+                schema={},
+                pdf_template={},
+                metadata={},
                 error=result.error
             )
 
-        # Store in database
-        from supabase import create_client, Client
+        # CHANGED: Return extraction results for review (don't save to DB yet)
+        return FormExtractionResponse(
+            success=True,
+            form_name=form_name,
+            specialty=specialty,
+            schema=result.schema,
+            pdf_template=result.pdf_template,
+            metadata=result.metadata
+        )
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error uploading custom form: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/save", response_model=CustomFormResponse)
+async def save_custom_form(request: SaveFormRequest):
+    """
+    Save doctor-reviewed form schema + PDF template to database.
+    Called AFTER doctor has reviewed and edited the extracted schema.
+
+    Args:
+        request: SaveFormRequest with reviewed schema and PDF template
+
+    Returns:
+        CustomFormResponse with saved form details
+    """
+    try:
+        user_id = get_current_user_id()
+
+        # Validate form name
+        converter = FormConverterAPI()
+        valid_name, name_error = converter.validate_form_name(request.form_name)
+        if not valid_name:
+            raise HTTPException(status_code=400, detail=f"Invalid form name: {name_error}")
+
+        valid_specialty, specialty_error = converter.validate_specialty(request.specialty)
+        if not valid_specialty:
+            raise HTTPException(status_code=400, detail=f"Invalid specialty: {specialty_error}")
+
+        # Calculate metadata from schema
+        field_count = 0
+        section_count = 0
+
+        # Handle both dict (new format) and list (fallback) schema structures
+        if isinstance(request.schema, dict):
+            section_count = len(request.schema)
+            for section_data in request.schema.values():
+                if isinstance(section_data, dict) and 'fields' in section_data:
+                    field_count += len(section_data.get('fields', []))
+        elif isinstance(request.schema, list):
+            section_count = len(request.schema)
+            for section in request.schema:
+                if isinstance(section, dict) and 'fields' in section:
+                    field_count += len(section.get('fields', []))
+
+        # Connect to Supabase
+        from supabase import create_client, Client
         supabase_url = os.getenv("SUPABASE_URL")
         supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
         supabase: Client = create_client(supabase_url, supabase_key)
 
         # Insert into custom_forms table
         form_data = {
-            "form_name": form_name,
-            "specialty": specialty,
+            "form_name": request.form_name,
+            "specialty": request.specialty,
             "created_by": user_id,
-            "is_public": is_public,
-            "form_schema": result.schema,
-            "schema_code": result.schema_code,
-            "migration_sql": result.migration_sql,
-            "typescript_types": result.typescript_types,
-            "description": description,
-            "field_count": result.metadata.get('total_fields', 0),
-            "section_count": len(result.schema),
-            "image_count": result.metadata.get('image_count', len(files)),
-            "status": "draft"
+            "is_public": request.is_public,
+            "form_schema": request.schema,
+            "pdf_template": request.pdf_template,  # Save PDF template
+            "description": request.description,
+            "field_count": field_count,
+            "section_count": section_count,
+            "status": "draft"  # Starts as draft
         }
 
         response = supabase.table("custom_forms").insert(form_data).execute()
@@ -177,19 +258,26 @@ async def upload_custom_form(
 
         form_record = response.data[0]
 
-        return FormConversionStatusResponse(
-            success=True,
-            form_id=form_record['id'],
-            form_name=form_name,
-            specialty=specialty,
-            field_count=form_data['field_count'],
-            section_count=form_data['section_count']
+        # Return saved form details
+        return CustomFormResponse(
+            id=form_record['id'],
+            form_name=form_record['form_name'],
+            specialty=form_record['specialty'],
+            description=form_record.get('description'),
+            created_by=form_record['created_by'],
+            is_public=form_record['is_public'],
+            status=form_record['status'],
+            version=form_record['version'],
+            field_count=form_record['field_count'] or 0,
+            section_count=form_record['section_count'] or 0,
+            created_at=form_record['created_at'],
+            updated_at=form_record['updated_at']
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error uploading custom form: {str(e)}")
+        print(f"❌ Error saving custom form: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -480,6 +568,115 @@ async def get_default_forms_for_specialty(specialty: str):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/filled-forms/{filled_form_id}/pdf")
+async def download_filled_form_pdf(filled_form_id: str):
+    """
+    Generate and download PDF for a filled custom form using stored pdf_template.
+
+    Args:
+        filled_form_id: ID of the filled form record
+
+    Returns:
+        StreamingResponse with PDF file
+    """
+    try:
+        user_id = get_current_user_id()
+
+        # Import PDF generator
+        from pdf_generator import generate_custom_form_pdf
+
+        # Connect to Supabase
+        from supabase import create_client, Client
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+        supabase: Client = create_client(supabase_url, supabase_key)
+
+        # Fetch filled form
+        filled_form_response = supabase.table("filled_forms")\
+            .select("*, custom_forms!inner(*)")\
+            .eq("id", filled_form_id)\
+            .execute()
+
+        if not filled_form_response.data:
+            raise HTTPException(status_code=404, detail="Filled form not found")
+
+        filled_form = filled_form_response.data[0]
+        custom_form = filled_form['custom_forms']
+
+        # Verify user has access (either created the form or it's public)
+        if filled_form['filled_by'] != user_id and not custom_form['is_public']:
+            raise HTTPException(status_code=403, detail="Access denied to this form")
+
+        # Get pdf_template
+        pdf_template = custom_form.get('pdf_template')
+        if not pdf_template:
+            raise HTTPException(
+                status_code=400,
+                detail="This form does not have a PDF template. Please contact support."
+            )
+
+        # Get form data
+        form_data = filled_form['form_data']
+
+        # Fetch patient info if available
+        patient = None
+        patient_id = filled_form.get('patient_id')
+        if patient_id:
+            patient_response = supabase.table("patients")\
+                .select("*")\
+                .eq("id", patient_id)\
+                .execute()
+
+            if patient_response.data:
+                patient = patient_response.data[0]
+
+        # Fetch doctor info for logo/clinic name
+        doctor_info = None
+        doctor_response = supabase.table("doctor_profiles")\
+            .select("clinic_name, clinic_logo_url")\
+            .eq("user_id", user_id)\
+            .execute()
+
+        if doctor_response.data:
+            doctor_info = doctor_response.data[0]
+
+        # Generate PDF
+        print(f"📄 Generating PDF for filled form: {filled_form_id}")
+        pdf_buffer = generate_custom_form_pdf(
+            form_data=form_data,
+            pdf_template=pdf_template,
+            form_name=custom_form['form_name'],
+            specialty=custom_form['specialty'],
+            patient=patient,
+            doctor_info=doctor_info
+        )
+
+        # Create filename
+        form_name_safe = custom_form['form_name'].replace(' ', '_').replace('/', '_')
+        patient_name = patient['name'].replace(' ', '_').replace('/', '_') if patient else 'patient'
+        filename = f"{form_name_safe}_{patient_name}_{filled_form_id[:8]}.pdf"
+
+        print(f"✅ PDF generated successfully: {filename}")
+
+        # Return as streaming response
+        from fastapi.responses import StreamingResponse
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating PDF: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
 
 
 # ============================================
