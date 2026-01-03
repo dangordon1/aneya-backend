@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 
 from tools.form_converter.api import FormConverterAPI
-from mcp_servers.form_schemas import FORM_SCHEMAS_BY_SPECIALTY, list_forms_by_specialty
+from api import get_supabase_client
 
 # Create router
 router = APIRouter(prefix="/api/custom-forms", tags=["custom-forms"])
@@ -432,22 +432,24 @@ async def get_default_forms_for_specialty(specialty: str):
 
         backend_specialty = specialty_mapping.get(specialty.lower(), specialty.lower())
 
-        if backend_specialty not in FORM_SCHEMAS_BY_SPECIALTY:
-            return []  # Return empty list if no default forms for this specialty
+        # Query database for form schemas by specialty
+        supabase = get_supabase_client()
+        result = supabase.table('form_schemas')\
+            .select('form_type, specialty, description, schema_definition, version')\
+            .eq('specialty', backend_specialty)\
+            .eq('is_active', True)\
+            .execute()
 
-        specialty_forms = FORM_SCHEMAS_BY_SPECIALTY[backend_specialty]
+        if not result.data:
+            return []  # Return empty list if no forms for this specialty
 
-        # Build response with metadata about each default form
+        # Build response with metadata about each form schema
         default_forms = []
 
-        form_descriptions = {
-            'obgyn': 'Comprehensive OB/GYN consultation form',
-            'infertility': 'Infertility assessment and treatment tracking',
-            'antenatal': 'Antenatal care and pregnancy monitoring',
-            'consultation_form': 'General cardiology consultation form'
-        }
+        for form_data in result.data:
+            form_schema = form_data['schema_definition']
+            form_type = form_data['form_type']
 
-        for form_type, form_schema in specialty_forms.items():
             # Count fields and sections
             field_count = 0
             section_count = len(form_schema)
@@ -460,11 +462,11 @@ async def get_default_forms_for_specialty(specialty: str):
                 id=f"default-{backend_specialty}-{form_type}",  # Synthetic ID for default forms
                 form_name=form_type,
                 specialty=backend_specialty,
-                description=form_descriptions.get(form_type, f"Built-in {form_type} form"),
+                description=form_data.get('description', f"Built-in {form_type} form"),
                 created_by="system",  # System-created
                 is_public=True,
                 status="active",
-                version=1,
+                version=form_data.get('version', 1),
                 field_count=field_count,
                 section_count=section_count,
                 created_at=datetime.now().isoformat(),

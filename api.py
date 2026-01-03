@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from google.cloud import storage
 import firebase_admin
 from firebase_admin import credentials
+from functools import lru_cache
+import copy
 
 # Load environment variables from .env file
 load_dotenv()
@@ -44,6 +46,32 @@ if not firebase_admin._apps:
         print(f"✅ Firebase Admin SDK initialized (project: {FIREBASE_PROJECT_ID})")
     except Exception as e:
         print(f"⚠️  Firebase Admin SDK initialization warning: {e}")
+
+
+def get_git_branch() -> str:
+    """Get current git branch name"""
+    # First try environment variable (for production/Cloud Run)
+    branch = os.getenv("GIT_BRANCH")
+    if branch:
+        return branch
+
+    # Fall back to git command (for local development)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=str(Path(__file__).parent)
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception as e:
+        print(f"⚠️  Failed to get git branch: {e}")
+
+    return "unknown"
+
 
 # Add servers directory to path (servers is in the backend repo root)
 sys.path.insert(0, str(Path(__file__).parent / "servers"))
@@ -65,6 +93,7 @@ async def lifespan(app: FastAPI):
 
     # Startup
     print("🚀 Starting Aneya API...")
+    print(f"🌿 Running on branch: {get_git_branch()}")
 
     # Check for Anthropic API key - REQUIRED!
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -136,6 +165,8 @@ app.add_middleware(
         "http://localhost:5175",  # Local development (alternative port)
         "http://localhost:5176",  # Local development (alternative port)
         "http://localhost:3000",
+        "http://localhost:9000",  # Local development (alternative port)
+        "http://localhost:9001",  # Local development (alternative port)
         "https://aneya.vercel.app",  # Production frontend
         "https://aneya.health",  # Custom domain
         "https://www.aneya.health",  # Custom domain with www
@@ -170,6 +201,7 @@ class HealthResponse(BaseModel):
     """Health check response"""
     status: str
     message: str
+    branch: str = "unknown"
 
 
 async def get_country_from_ip(ip_address: str) -> Optional[dict]:
@@ -209,7 +241,8 @@ async def root():
     """Root endpoint"""
     return {
         "status": "ok",
-        "message": "Aneya Clinical Decision Support API is running"
+        "message": "Aneya Clinical Decision Support API is running",
+        "branch": get_git_branch()
     }
 
 
@@ -221,7 +254,8 @@ async def health_check():
 
     return {
         "status": "healthy",
-        "message": "All systems operational"
+        "message": "All systems operational",
+        "branch": get_git_branch()
     }
 
 
@@ -233,7 +267,8 @@ async def api_health_check():
 
     return {
         "status": "healthy",
-        "message": "All systems operational"
+        "message": "All systems operational",
+        "branch": get_git_branch()
     }
 
 
@@ -4537,18 +4572,13 @@ def get_supabase_client():
     return create_client(supabase_url, supabase_key)
 
 
-def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict:
+@lru_cache(maxsize=32)
+def _get_form_schema_from_db_cached(form_type: str, full_metadata: bool = False) -> dict:
     """
-    Fetch form schema from database instead of Python file.
-    Single source of truth for all form schemas.
+    Internal cached function for fetching form schemas from database.
 
-    Args:
-        form_type: The form type to fetch (e.g., 'antenatal', 'obgyn')
-        full_metadata: If True, returns full metadata (title, description, version)
-                      If False, returns only schema_definition (default for backwards compatibility)
-
-    Returns:
-        dict: Schema definition or full metadata depending on full_metadata flag
+    DO NOT CALL DIRECTLY - use get_form_schema_from_db() instead.
+    This function is cached and returns the same object instance.
     """
     try:
         supabase = get_supabase_client()
@@ -4571,7 +4601,7 @@ def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict
             # Return all metadata for frontend
             return {
                 'schema': result.data['schema_definition'],
-                'title': result.data.get('description', ''),  # Use description as title
+                'title': result.data.get('description', ''),
                 'description': result.data.get('description', ''),
                 'version': result.data.get('version', '1.0'),
                 'form_type': result.data.get('form_type', ''),
@@ -4583,10 +4613,36 @@ def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict
 
     except Exception as e:
         print(f"❌ Error fetching schema for {form_type}: {e}")
-        # Fallback to Python file if database fetch fails
-        print(f"⚠️  Falling back to Python schema file")
-        from mcp_servers.form_schemas import get_schema_for_form_type
-        return get_schema_for_form_type(form_type)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch schema from database: {str(e)}"
+        )
+
+
+def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict:
+    """
+    Fetch form schema from database with LRU caching.
+
+    Schemas are cached in memory (max 32 entries) and automatically evicted
+    when the cache is full. Returns a deep copy to prevent cache pollution.
+
+    Single source of truth for all form schemas.
+
+    Args:
+        form_type: The form type to fetch (e.g., 'antenatal', 'obgyn')
+        full_metadata: If True, returns full metadata (title, description, version)
+                      If False, returns only schema_definition (default for backwards compatibility)
+
+    Returns:
+        dict: Deep copy of schema definition or full metadata depending on full_metadata flag
+
+    Cache Info:
+        - Cache size: 32 entries max
+        - Cache lifetime: Until backend restart
+        - Invalidation: Automatic on backend restart or manual via _get_form_schema_from_db_cached.cache_clear()
+    """
+    # Return deep copy to prevent callers from mutating the cached object
+    return copy.deepcopy(_get_form_schema_from_db_cached(form_type, full_metadata))
 
 
 def build_extraction_prompt_hints_from_schema(schema: dict) -> str:
@@ -5072,6 +5128,29 @@ async def list_form_schemas():
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/cache-stats")
+async def get_cache_stats():
+    """
+    Get cache statistics for monitoring schema cache performance.
+
+    Returns hit/miss ratios and cache size information.
+    """
+    cache_info = _get_form_schema_from_db_cached.cache_info()
+    total_requests = cache_info.hits + cache_info.misses
+    hit_rate = cache_info.hits / total_requests if total_requests > 0 else 0
+
+    return {
+        "schema_cache": {
+            "hits": cache_info.hits,
+            "misses": cache_info.misses,
+            "maxsize": cache_info.maxsize,
+            "currsize": cache_info.currsize,
+            "hit_rate": round(hit_rate * 100, 2),
+            "hit_rate_percentage": f"{round(hit_rate * 100, 2)}%"
+        }
+    }
 
 
 # ============================================
