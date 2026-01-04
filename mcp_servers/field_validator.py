@@ -55,6 +55,13 @@ def validate_field_update(
             return _validate_boolean(value, metadata)
         elif field_type == 'object':
             return _validate_object(value, metadata)
+        elif field_type == 'array':
+            # Array fields (tables) - accept list or skip validation for now
+            if isinstance(value, list):
+                return True, value, None
+            else:
+                # Try to convert single value to array
+                return True, [value], None
         else:
             return False, None, f"Unknown field type: {field_type}"
 
