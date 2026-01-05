@@ -2913,7 +2913,13 @@ async def download_consultation_pdf(appointment_id: str):
             specialty=specialty,
             patient=patient,
             doctor_info=doctor_info,
-            form_schema=custom_form.get('form_schema')  # Pass schema for table rendering
+            form_schema=custom_form.get('form_schema'),  # Pass schema for table rendering
+            # Optional custom colors (None = default Aneya colors)
+            # In future, could fetch from doctor preferences
+            primary_color=None,
+            accent_color=None,
+            text_color=None,
+            light_gray_color=None
         )
 
         # Create safe filename
@@ -4627,13 +4633,42 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
                 user_id = '8c55534b-3c7a-436a-bb00-70dc6722439f'
                 print(f"⚠️  Using system default as created_by: {user_id[:8]}...")
 
+            # Fetch appointment to get scheduled date for auto-fill
+            initial_form_data = {}
+            try:
+                appointment_result = supabase.table("appointments")\
+                    .select("scheduled_time")\
+                    .eq("id", request.appointment_id)\
+                    .single()\
+                    .execute()
+
+                if appointment_result.data and 'scheduled_time' in appointment_result.data:
+                    # Extract date from scheduled_time (format: YYYY-MM-DD)
+                    appointment_date = appointment_result.data['scheduled_time'][:10]
+
+                    # Initialize form_data with visit_records containing appointment date
+                    # This matches the antenatal form schema structure
+                    initial_form_data = {
+                        'antenatal_visits': {
+                            'visit_records': [
+                                {
+                                    'visit_date': appointment_date
+                                }
+                            ]
+                        }
+                    }
+                    print(f"📅 Auto-filled visit date: {appointment_date}")
+            except Exception as e:
+                print(f"⚠️  Could not fetch appointment date: {e}")
+                # Continue with empty form_data if appointment fetch fails
+
             # ✨ NEW: Create form in unified consultation_forms table with JSONB
             new_form_data = {
                 'patient_id': request.patient_id,
                 'appointment_id': request.appointment_id,
                 'form_type': consultation_type,
                 'specialty': 'obstetrics_gynecology',  # Based on doctor_specialty
-                'form_data': {},  # Empty JSONB, will be populated by extraction
+                'form_data': initial_form_data,  # Pre-populated with appointment date
                 'status': 'draft',
                 'created_by': user_id,
                 'updated_by': user_id,
