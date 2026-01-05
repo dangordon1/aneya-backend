@@ -4206,6 +4206,7 @@ class ExtractFormFieldsRequest(BaseModel):
     patient_context: dict
     current_form_state: dict
     chunk_index: int
+    appointment_id: Optional[str] = None  # For excluding current appointment from historical aggregation
 
 
 class ExtractFormFieldsResponse(BaseModel):
@@ -4586,7 +4587,8 @@ Extract all relevant clinical data as JSON:
             schema=schema,
             patient_context=request.patient_context,
             form_type=request.form_type,
-            patient_id=patient_id
+            patient_id=patient_id,
+            current_appointment_id=request.appointment_id  # Exclude current appointment from aggregation
         )
         print(f"📝 After historical aggregation: {len(field_updates)} fields")
 
@@ -4792,7 +4794,8 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             form_type=consultation_type,
             patient_context=patient_context,
             current_form_state=current_form_state,
-            chunk_index=0
+            chunk_index=0,
+            appointment_id=request.appointment_id  # Pass appointment_id to exclude from historical aggregation
         )
         extraction_result = await extract_form_fields(extraction_request)
 
@@ -5222,7 +5225,8 @@ async def apply_historical_aggregation(
     schema: dict,
     patient_context: dict,
     form_type: str,
-    patient_id: str = None
+    patient_id: str = None,
+    current_appointment_id: str = None
 ) -> dict:
     """
     Apply historical consultation aggregation to fields marked with
@@ -5234,6 +5238,7 @@ async def apply_historical_aggregation(
         patient_context: Patient context (may not have previous_forms yet)
         form_type: Current form type (e.g., 'antenatal')
         patient_id: Optional patient ID to fetch previous forms if not in context
+        current_appointment_id: Appointment ID to EXCLUDE from aggregation (avoid duplicates)
 
     Returns:
         Enhanced field_updates with historical data aggregated
@@ -5253,6 +5258,18 @@ async def apply_historical_aggregation(
 
     if not previous_forms:
         print(f"📋 No previous forms found, skipping aggregation")
+        return field_updates
+
+    # CRITICAL: Exclude forms from the CURRENT appointment to avoid duplicates
+    if current_appointment_id:
+        previous_forms = [
+            form for form in previous_forms
+            if form.get('appointment_id') != current_appointment_id
+        ]
+        print(f"📋 Excluded current appointment ({current_appointment_id}), left with {len(previous_forms)} previous forms")
+
+    if not previous_forms:
+        print(f"📋 No previous forms after excluding current appointment")
         return field_updates
 
     print(f"📋 Applying historical aggregation with {len(previous_forms)} previous forms")
