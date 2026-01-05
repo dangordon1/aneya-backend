@@ -920,14 +920,17 @@ async def share_custom_form(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/my-forms", response_model=List[CustomFormResponse])
-async def get_my_custom_forms(
+@router.get("/my-forms")
+async def get_my_forms_library(
     specialty: Optional[str] = None,
     status: Optional[str] = None,
     authorization: str = Header(..., description="Bearer token")
 ):
     """
-    Get all custom forms created by the current user.
+    Get doctor's complete form library (owned + adopted forms).
+    This is the list of forms available for consultation selection.
+
+    Auto-adopts public forms in doctor's specialty on first call (idempotent).
 
     Args:
         specialty: Optional filter by specialty
@@ -935,7 +938,7 @@ async def get_my_custom_forms(
         authorization: Firebase JWT token in Authorization header
 
     Returns:
-        List of custom forms
+        Dict with forms (owned + adopted), counts, and ownership metadata
     """
     try:
         # Verify Firebase authentication and get user ID
@@ -947,38 +950,80 @@ async def get_my_custom_forms(
         supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
         supabase: Client = create_client(supabase_url, supabase_key)
 
-        # Build query
-        query = supabase.table("custom_forms").select("*").eq("created_by", user_id)
+        # Get doctor's specialty for auto-adoption
+        doctor_result = supabase.table("doctors").select("specialty").eq("user_id", user_id).single().execute()
+        doctor_specialty = doctor_result.data.get('specialty') if doctor_result.data else None
+
+        # Auto-adopt public forms in doctor's specialty (idempotent - won't duplicate)
+        if doctor_specialty:
+            try:
+                result = supabase.rpc('auto_adopt_forms_for_doctor', {
+                    'p_doctor_id': user_id,
+                    'p_specialty': doctor_specialty
+                }).execute()
+                forms_added = result.data if result.data else 0
+                if forms_added > 0:
+                    print(f"  ✓ Auto-adopted {forms_added} forms for specialty {doctor_specialty}")
+            except Exception as e:
+                print(f"  ⚠️  Auto-adoption warning: {e}")
+                # Continue even if auto-adoption fails
+
+        # Build query for owned forms
+        owned_query = supabase.table("custom_forms").select("*").eq("created_by", user_id)
 
         if specialty:
-            query = query.eq("specialty", specialty)
-
+            owned_query = owned_query.eq("specialty", specialty)
         if status:
-            query = query.eq("status", status)
+            owned_query = owned_query.eq("status", status)
 
-        response = query.order("created_at", desc=True).execute()
+        owned_forms_response = owned_query.order("created_at", desc=True).execute()
+        owned_forms = owned_forms_response.data or []
 
-        return [
-            CustomFormResponse(
-                id=form['id'],
-                form_name=form['form_name'],
-                specialty=form['specialty'],
-                description=form.get('description'),
-                patient_criteria=form.get('patient_criteria') or f"General {form['specialty']} patients",
-                created_by=form['created_by'],
-                is_public=form['is_public'],
-                status=form['status'],
-                version=form['version'],
-                field_count=form['field_count'] or 0,
-                section_count=form['section_count'] or 0,
-                created_at=form['created_at'],
-                updated_at=form['updated_at']
-            )
-            for form in response.data
-        ]
+        # Add ownership metadata to owned forms
+        for form in owned_forms:
+            form['ownership_type'] = 'owned'
+            form['auto_adopted'] = False
+
+        # Build query for adopted forms with join to custom_forms
+        adopted_query = supabase.table("doctor_adopted_forms")\
+            .select("form_id, adopted_at, auto_adopted, custom_forms(*)")\
+            .eq("doctor_id", user_id)
+
+        adopted_result = adopted_query.execute()
+
+        # Flatten adopted forms and add ownership metadata
+        adopted_forms = []
+        for adoption in (adopted_result.data or []):
+            form = adoption.get('custom_forms')
+            if form:
+                form['ownership_type'] = 'adopted'
+                form['adopted_at'] = adoption['adopted_at']
+                form['auto_adopted'] = adoption['auto_adopted']
+
+                # Apply filters
+                if specialty and form.get('specialty') != specialty:
+                    continue
+                if status and form.get('status') != status:
+                    continue
+
+                adopted_forms.append(form)
+
+        # Combine and sort
+        all_forms = owned_forms + adopted_forms
+        all_forms.sort(key=lambda x: x.get('form_name', ''))
+
+        return {
+            "success": True,
+            "forms": all_forms,
+            "total": len(all_forms),
+            "owned_count": len(owned_forms),
+            "adopted_count": len(adopted_forms)
+        }
 
     except Exception as e:
-        print(f"❌ Error getting custom forms: {str(e)}")
+        print(f"❌ Error getting forms library: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1028,6 +1073,245 @@ async def get_public_custom_forms(specialty: Optional[str] = None):
 
     except Exception as e:
         print(f"❌ Error getting public forms: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/forms/browse")
+async def browse_forms_to_add(
+    specialty: Optional[str] = None,
+    search: Optional[str] = None,
+    authorization: str = Header(..., description="Bearer token")
+):
+    """
+    Browse all public forms that can be added to "My Forms".
+    Excludes forms already in the doctor's library (owned or adopted).
+
+    Args:
+        specialty: Optional filter by specialty
+        search: Optional search in form name or description
+        authorization: Firebase JWT token in Authorization header
+
+    Returns:
+        Dict with available forms to add
+    """
+    try:
+        # Verify Firebase authentication and get user ID
+        user_id = verify_firebase_token_and_get_user_id(authorization)
+
+        from supabase import create_client, Client
+
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+        supabase: Client = create_client(supabase_url, supabase_key)
+
+        # Get all public active forms
+        query = supabase.table("custom_forms")\
+            .select("*")\
+            .eq("is_public", True)\
+            .eq("status", "active")
+
+        if specialty:
+            query = query.eq("specialty", specialty)
+
+        all_public = query.execute()
+        all_public_forms = all_public.data or []
+
+        # Get forms already in doctor's library (owned + adopted)
+        owned = supabase.table("custom_forms")\
+            .select("id")\
+            .eq("created_by", user_id)\
+            .execute()
+
+        adopted = supabase.table("doctor_adopted_forms")\
+            .select("form_id")\
+            .eq("doctor_id", user_id)\
+            .execute()
+
+        library_form_ids = set(
+            [f['id'] for f in (owned.data or [])] +
+            [a['form_id'] for a in (adopted.data or [])]
+        )
+
+        # Filter out forms already in library
+        available_forms = [
+            form for form in all_public_forms
+            if form['id'] not in library_form_ids
+        ]
+
+        # Optional search filter
+        if search:
+            search_lower = search.lower()
+            available_forms = [
+                form for form in available_forms
+                if search_lower in form.get('form_name', '').lower()
+                or search_lower in (form.get('description') or '').lower()
+            ]
+
+        return {
+            "success": True,
+            "forms": available_forms,
+            "total": len(available_forms)
+        }
+
+    except Exception as e:
+        print(f"❌ Error browsing forms: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/forms/{form_id}/adopt")
+async def adopt_form_to_library(
+    form_id: str,
+    authorization: str = Header(..., description="Bearer token")
+):
+    """
+    Add a public form to the doctor's "My Forms" library.
+
+    Args:
+        form_id: UUID of the form to adopt
+        authorization: Firebase JWT token in Authorization header
+
+    Returns:
+        Success message with form details
+    """
+    try:
+        # Verify Firebase authentication and get user ID
+        user_id = verify_firebase_token_and_get_user_id(authorization)
+
+        from supabase import create_client, Client
+
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+        supabase: Client = create_client(supabase_url, supabase_key)
+
+        # Verify form exists and is public
+        form_result = supabase.table("custom_forms")\
+            .select("id, form_name, is_public, created_by, status")\
+            .eq("id", form_id)\
+            .single()\
+            .execute()
+
+        if not form_result.data:
+            raise HTTPException(status_code=404, detail="Form not found")
+
+        form = form_result.data
+
+        if not form.get('is_public'):
+            raise HTTPException(status_code=403, detail="Can only adopt public forms")
+
+        if form.get('created_by') == user_id:
+            raise HTTPException(status_code=400, detail="Cannot adopt your own form (it's already in your library)")
+
+        if form.get('status') != 'active':
+            raise HTTPException(status_code=400, detail="Can only adopt active forms")
+
+        # Check if already adopted
+        existing = supabase.table("doctor_adopted_forms")\
+            .select("id")\
+            .eq("doctor_id", user_id)\
+            .eq("form_id", form_id)\
+            .execute()
+
+        if existing.data:
+            return {
+                "success": True,
+                "message": "Form already in your library",
+                "form_id": form_id,
+                "form_name": form['form_name']
+            }
+
+        # Adopt the form
+        supabase.table("doctor_adopted_forms").insert({
+            "doctor_id": user_id,
+            "form_id": form_id,
+            "auto_adopted": False
+        }).execute()
+
+        print(f"✓ Doctor {user_id} adopted form '{form['form_name']}'")
+
+        return {
+            "success": True,
+            "message": f"Added '{form['form_name']}' to your library",
+            "form_id": form_id,
+            "form_name": form['form_name']
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error adopting form: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/forms/{form_id}/remove")
+async def remove_form_from_library(
+    form_id: str,
+    authorization: str = Header(..., description="Bearer token")
+):
+    """
+    Remove an adopted form from the doctor's library.
+    Cannot remove forms you created (use DELETE /forms/{id} instead).
+
+    Args:
+        form_id: UUID of the form to remove
+        authorization: Firebase JWT token in Authorization header
+
+    Returns:
+        Success message
+    """
+    try:
+        # Verify Firebase authentication and get user ID
+        user_id = verify_firebase_token_and_get_user_id(authorization)
+
+        from supabase import create_client, Client
+
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+        supabase: Client = create_client(supabase_url, supabase_key)
+
+        # Check if this is an owned form
+        owned_result = supabase.table("custom_forms")\
+            .select("id, form_name")\
+            .eq("id", form_id)\
+            .eq("created_by", user_id)\
+            .execute()
+
+        if owned_result.data:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot remove owned forms. Use DELETE /forms/{id} to delete forms you created."
+            )
+
+        # Remove adoption record
+        delete_result = supabase.table("doctor_adopted_forms")\
+            .delete()\
+            .eq("doctor_id", user_id)\
+            .eq("form_id", form_id)\
+            .execute()
+
+        if not delete_result.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Form not found in your library"
+            )
+
+        print(f"✓ Doctor {user_id} removed form {form_id} from library")
+
+        return {
+            "success": True,
+            "message": "Form removed from your library",
+            "form_id": form_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error removing form from library: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1323,19 +1607,37 @@ async def select_form_for_consultation(
         print(f"\n🔍 Selecting form for specialty: {specialty}")
         print(f"👤 Patient context: {patient_context[:100]}...")
 
-        # Get all forms for this specialty (user's own + public forms)
-        forms_query = supabase.table("custom_forms").select("*").eq("specialty", specialty).eq("status", "active")
+        # Get forms in doctor's library (owned + adopted)
+        # This ensures only forms in "My Forms" are considered for consultation selection
 
-        # Filter: created_by = user_id OR is_public = true
-        forms_response = forms_query.execute()
+        # Get owned forms
+        owned_forms_query = supabase.table("custom_forms")\
+            .select("*")\
+            .eq("created_by", user_id)\
+            .eq("specialty", specialty)\
+            .eq("status", "active")
 
-        # Filter in Python (Supabase doesn't support OR in eq() easily)
-        available_forms = [
-            form for form in forms_response.data
-            if form['created_by'] == user_id or form['is_public'] == True
-        ]
+        owned_forms_response = owned_forms_query.execute()
+        owned_forms = owned_forms_response.data or []
 
-        print(f"📋 Found {len(available_forms)} forms for {specialty}")
+        # Get adopted forms with join to custom_forms
+        adopted_forms_query = supabase.table("doctor_adopted_forms")\
+            .select("form_id, custom_forms(*)")\
+            .eq("doctor_id", user_id)
+
+        adopted_result = adopted_forms_query.execute()
+
+        # Flatten adopted forms and filter by specialty
+        adopted_forms = []
+        for adoption in (adopted_result.data or []):
+            form = adoption.get('custom_forms')
+            if form and form.get('specialty') == specialty and form.get('status') == 'active':
+                adopted_forms.append(form)
+
+        # Combine owned + adopted forms
+        available_forms = owned_forms + adopted_forms
+
+        print(f"📋 Found {len(available_forms)} forms in library for {specialty} ({len(owned_forms)} owned, {len(adopted_forms)} adopted)")
 
         if len(available_forms) == 0:
             raise HTTPException(status_code=404, detail=f"No forms available for specialty: {specialty}")
