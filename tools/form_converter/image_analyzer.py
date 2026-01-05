@@ -387,6 +387,7 @@ Return a JSON object:
 - Number input → type: "number", input_type: "number"
 - Date picker → type: "string", input_type: "date", format: "YYYY-MM-DD"
 - Checkbox (single) → type: "boolean", input_type: "checkbox"
+- YES/NO buttons → type: "boolean", input_type: "checkbox" (YES=true, NO=false)
 - Checkbox group → type: "object", input_type: "checkbox_group"
 - Radio buttons → type: "string", input_type: "radio"
 - Dropdown/select → type: "string", input_type: "dropdown"
@@ -591,6 +592,13 @@ Return a JSON object with this exact structure:
     ]
   }
 }
+
+**IMPORTANT: YES/NO BUTTON DETECTION**:
+- When you see YES/NO buttons, checkboxes, or yes/no options for a field:
+  - Use type: "boolean" (not "string")
+  - Use input_type: "checkbox"
+  - This applies to fields like "Hypertension: YES/NO", "Diabetes: [ ] YES [ ] NO", etc.
+  - The stored value will be true (YES) or false (NO)
 
 **TABLE DETECTION - TWO PATTERNS**:
 
