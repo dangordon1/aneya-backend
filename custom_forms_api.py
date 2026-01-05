@@ -950,15 +950,19 @@ async def get_my_forms_library(
         supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
         supabase: Client = create_client(supabase_url, supabase_key)
 
-        # Get doctor's specialty for auto-adoption
-        doctor_result = supabase.table("doctors").select("specialty").eq("user_id", user_id).single().execute()
-        doctor_specialty = doctor_result.data.get('specialty') if doctor_result.data else None
+        # Get doctor's UUID and specialty for auto-adoption
+        doctor_result = supabase.table("doctors").select("id, specialty").eq("user_id", user_id).single().execute()
+        if not doctor_result.data:
+            raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+        doctor_id = doctor_result.data.get('id')
+        doctor_specialty = doctor_result.data.get('specialty')
 
         # Auto-adopt public forms in doctor's specialty (idempotent - won't duplicate)
         if doctor_specialty:
             try:
                 result = supabase.rpc('auto_adopt_forms_for_doctor', {
-                    'p_doctor_id': user_id,
+                    'p_firebase_user_id': user_id,
                     'p_specialty': doctor_specialty
                 }).execute()
                 forms_added = result.data if result.data else 0
@@ -987,7 +991,7 @@ async def get_my_forms_library(
         # Build query for adopted forms with join to custom_forms
         adopted_query = supabase.table("doctor_adopted_forms")\
             .select("form_id, adopted_at, auto_adopted, custom_forms(*)")\
-            .eq("doctor_id", user_id)
+            .eq("doctor_id", doctor_id)
 
         adopted_result = adopted_query.execute()
 
@@ -1116,6 +1120,13 @@ async def browse_forms_to_add(
         all_public = query.execute()
         all_public_forms = all_public.data or []
 
+        # Get doctor's UUID
+        doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
+        if not doctor_result.data:
+            raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+        doctor_id = doctor_result.data.get('id')
+
         # Get forms already in doctor's library (owned + adopted)
         owned = supabase.table("custom_forms")\
             .select("id")\
@@ -1124,7 +1135,7 @@ async def browse_forms_to_add(
 
         adopted = supabase.table("doctor_adopted_forms")\
             .select("form_id")\
-            .eq("doctor_id", user_id)\
+            .eq("doctor_id", doctor_id)\
             .execute()
 
         library_form_ids = set(
@@ -1185,6 +1196,13 @@ async def adopt_form_to_library(
         supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
         supabase: Client = create_client(supabase_url, supabase_key)
 
+        # Get doctor's UUID
+        doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
+        if not doctor_result.data:
+            raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+        doctor_id = doctor_result.data.get('id')
+
         # Verify form exists and is public
         form_result = supabase.table("custom_forms")\
             .select("id, form_name, is_public, created_by, status")\
@@ -1209,7 +1227,7 @@ async def adopt_form_to_library(
         # Check if already adopted
         existing = supabase.table("doctor_adopted_forms")\
             .select("id")\
-            .eq("doctor_id", user_id)\
+            .eq("doctor_id", doctor_id)\
             .eq("form_id", form_id)\
             .execute()
 
@@ -1223,7 +1241,7 @@ async def adopt_form_to_library(
 
         # Adopt the form
         supabase.table("doctor_adopted_forms").insert({
-            "doctor_id": user_id,
+            "doctor_id": doctor_id,
             "form_id": form_id,
             "auto_adopted": False
         }).execute()
@@ -1272,6 +1290,13 @@ async def remove_form_from_library(
         supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
         supabase: Client = create_client(supabase_url, supabase_key)
 
+        # Get doctor's UUID
+        doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
+        if not doctor_result.data:
+            raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+        doctor_id = doctor_result.data.get('id')
+
         # Check if this is an owned form
         owned_result = supabase.table("custom_forms")\
             .select("id, form_name")\
@@ -1288,7 +1313,7 @@ async def remove_form_from_library(
         # Remove adoption record
         delete_result = supabase.table("doctor_adopted_forms")\
             .delete()\
-            .eq("doctor_id", user_id)\
+            .eq("doctor_id", doctor_id)\
             .eq("form_id", form_id)\
             .execute()
 
@@ -1607,6 +1632,13 @@ async def select_form_for_consultation(
         print(f"\n🔍 Selecting form for specialty: {specialty}")
         print(f"👤 Patient context: {patient_context[:100]}...")
 
+        # Get doctor's UUID
+        doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
+        if not doctor_result.data:
+            raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+        doctor_id = doctor_result.data.get('id')
+
         # Get forms in doctor's library (owned + adopted)
         # This ensures only forms in "My Forms" are considered for consultation selection
 
@@ -1623,7 +1655,7 @@ async def select_form_for_consultation(
         # Get adopted forms with join to custom_forms
         adopted_forms_query = supabase.table("doctor_adopted_forms")\
             .select("form_id, custom_forms(*)")\
-            .eq("doctor_id", user_id)
+            .eq("doctor_id", doctor_id)
 
         adopted_result = adopted_forms_query.execute()
 
