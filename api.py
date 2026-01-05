@@ -5010,10 +5010,11 @@ def fetch_patient_context(patient_id: str, form_type: str = None) -> dict:
                 for allergy in allergies_result.data
             ]
 
-        # 5. Fetch recent consultation forms WITH ACTUAL DATA (last 10 completed forms)
+        # 5. Fetch recent consultation forms WITH ACTUAL DATA (last 10 forms, any status)
+        # Note: Include both 'partial' and 'completed' to aggregate ongoing consultations
         query = supabase.table('consultation_forms').select(
             'id, form_type, specialty, created_at, form_data, status, appointment_id'
-        ).eq('patient_id', patient_id).eq('status', 'completed')
+        ).eq('patient_id', patient_id).in_('status', ['partial', 'completed'])
 
         # Filter by form_type if specified (for targeted historical aggregation)
         if form_type:
