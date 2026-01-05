@@ -2788,6 +2788,45 @@ async def update_appointment_status(
     }
 
 
+@app.delete("/api/appointments/{appointment_id}")
+async def delete_appointment(appointment_id: str):
+    """
+    Delete an appointment by ID.
+
+    Args:
+        appointment_id: The ID of the appointment to delete
+
+    Returns:
+        Success response with deletion confirmation
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # Verify the appointment exists before deleting
+        get_result = supabase.table("appointments").select("id").eq("id", appointment_id).execute()
+        if not get_result.data:
+            raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found")
+
+        print(f"🗑️  Deleting appointment: {appointment_id}")
+
+        # Delete the appointment
+        supabase.table("appointments").delete().eq("id", appointment_id).execute()
+
+        print(f"✅ Appointment deleted: {appointment_id}")
+
+        return {
+            "success": True,
+            "message": f"Appointment {appointment_id} has been deleted",
+            "appointment_id": appointment_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting appointment: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete appointment: {str(e)}")
+
+
 @app.get("/api/appointments/{appointment_id}/consultation-pdf")
 async def download_consultation_pdf(appointment_id: str):
     """
