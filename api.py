@@ -4429,12 +4429,57 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
         print(f"📊 Flattened {len(flattened_schema)} fields for extraction")
         print(f"   Field mapping has {len(field_mapping)} entries")
 
+        # Build patient context section for the prompt
+        patient_context_text = ""
+        if request.patient_context:
+            demographics = request.patient_context.get('demographics', {})
+            medications = request.patient_context.get('medications', [])
+            conditions = request.patient_context.get('conditions', [])
+            allergies = request.patient_context.get('allergies', [])
+
+            # Build patient profile summary
+            patient_parts = []
+            if demographics.get('name'):
+                patient_parts.append(f"Name: {demographics['name']}")
+            if demographics.get('age_years'):
+                patient_parts.append(f"Age: {demographics['age_years']} years")
+            if demographics.get('sex'):
+                patient_parts.append(f"Sex: {demographics['sex']}")
+
+            if patient_parts:
+                patient_context_text = f"\n\nPatient Profile:\n{', '.join(patient_parts)}"
+
+            # Add medications if any
+            if medications:
+                meds_text = "\n".join([
+                    f"- {med['name']}" + (f" ({med['dosage']})" if med.get('dosage') else "")
+                    for med in medications[:5]  # Limit to 5 most relevant
+                ])
+                patient_context_text += f"\n\nCurrent Medications:\n{meds_text}"
+
+            # Add conditions if any
+            if conditions:
+                conds_text = "\n".join([
+                    f"- {cond['name']}" + (f" ({cond['status']})" if cond.get('status') else "")
+                    for cond in conditions[:5]  # Limit to 5 most relevant
+                ])
+                patient_context_text += f"\n\nMedical History:\n{conds_text}"
+
+            # Add allergies if any (critical for safety)
+            if allergies:
+                allergies_text = "\n".join([
+                    f"- {allergy['allergen']}" + (f" ({allergy.get('severity', 'unknown')} severity)" if allergy.get('severity') else "")
+                    for allergy in allergies
+                ])
+                patient_context_text += f"\n\nAllergies:\n{allergies_text}"
+
         # Build Claude prompt for extraction
         system_prompt = f"""You are a medical data extraction specialist. Your task is to extract structured clinical data from a doctor-patient consultation dialogue.
 
 Extract information from BOTH doctor and patient statements. Patient responses often contain critical medical information (e.g., previous pregnancies, symptoms, medical history).
 
 Extract ONLY information explicitly stated in the conversation. Do NOT infer, guess, or make assumptions.
+{patient_context_text}
 
 Form Type: {request.form_type.upper()}
 Available Fields:
@@ -4449,6 +4494,7 @@ Rules:
 6. Skip extraction if confidence < 0.7
 7. For blood pressure, use "bp" field with format "120/80"
 8. Return JSON with field_updates and confidence_scores
+9. Use patient context (demographics, medications, conditions, allergies) to validate and contextualize extracted information
 
 Examples:
 - Doctor: "Any previous pregnancies?" → Patient: "Yes, two" → Extract: "gravida": 2
@@ -4533,9 +4579,20 @@ Extract all relevant clinical data as JSON:
         print(f"📝 Mapped to {len(field_updates)} nested fields")
         print(f"   After mapping: {field_updates}")
 
-        # Exclude fields already in current form state
-        field_updates = exclude_existing_fields(field_updates, request.current_form_state)
-        print(f"📝 After exclude existing: {len(field_updates)} fields")
+        # ✨ NEW: Apply historical consultation aggregation for fields marked with requires_previous_consultations
+        patient_id = request.patient_context.get('demographics', {}).get('patient_id') or request.patient_context.get('patient_id')
+        field_updates = await apply_historical_aggregation(
+            field_updates=field_updates,
+            schema=schema,
+            patient_context=request.patient_context,
+            form_type=request.form_type,
+            patient_id=patient_id
+        )
+        print(f"📝 After historical aggregation: {len(field_updates)} fields")
+
+        # Exclude fields already in current form state (smart version that keeps aggregated arrays)
+        field_updates = exclude_existing_fields_smart(field_updates, request.current_form_state)
+        print(f"📝 After smart exclude: {len(field_updates)} fields")
         print(f"   Remaining: {field_updates}")
 
         # Validate all extracted fields
@@ -4724,11 +4781,16 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             else:
                 raise Exception("Failed to create form")
 
+        # Step 4b: Fetch comprehensive patient context (filtered by form_type for targeted aggregation)
+        patient_context = fetch_patient_context(request.patient_id, form_type=consultation_type)
+        patient_context['patient_id'] = request.patient_id  # Keep patient_id for backward compatibility
+        patient_context['demographics']['patient_id'] = request.patient_id  # Also add to demographics for aggregation
+
         # Step 5: Extract form fields using existing endpoint function
         extraction_request = ExtractFormFieldsRequest(
             diarized_segments=diarized_segments,
             form_type=consultation_type,
-            patient_context={'patient_id': request.patient_id},
+            patient_context=patient_context,
             current_form_state=current_form_state,
             chunk_index=0
         )
@@ -4741,9 +4803,13 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             print(f"🔄 Updating form with {len(field_updates)} fields...")
             print(f"   Fields to update: {list(field_updates.keys())}")
 
-            # ✨ NEW: Merge extracted fields into form_data JSONB
-            # Merge with existing data instead of replacing
-            merged_form_data = {**current_form_state, **field_updates}
+            # ✨ NEW: Deep merge extracted fields into form_data JSONB
+            # Deep merge preserves nested structures and arrays (critical for aggregation)
+            merged_form_data = deep_merge(current_form_state, field_updates)
+            print(f"🔄 Deep merged form data:")
+            print(f"   Current state had {len(current_form_state)} top-level keys")
+            print(f"   Field updates have {len(field_updates)} nested paths")
+            print(f"   Merged result has {len(merged_form_data)} top-level keys")
 
             # Update the form
             user_id = request.patient_snapshot.get('user_id')
@@ -4827,6 +4893,455 @@ def get_supabase_client():
         )
 
     return create_client(supabase_url, supabase_key)
+
+
+def fetch_patient_context(patient_id: str, form_type: str = None) -> dict:
+    """
+    Fetch comprehensive patient context for form filling.
+
+    Retrieves:
+    - Demographics (age, sex, name)
+    - Current medications
+    - Medical conditions/history
+    - Allergies
+    - Previous consultation form data (WITH ACTUAL FORM DATA for aggregation)
+
+    Args:
+        patient_id: UUID of the patient
+        form_type: Optional form type to filter historical forms (e.g., 'antenatal')
+
+    Returns:
+        Dictionary containing patient context with keys:
+        - demographics: {age_years, sex, name, date_of_birth, patient_id}
+        - medications: List of current medications
+        - conditions: List of medical conditions
+        - allergies: List of allergies
+        - previous_forms: List of completed forms WITH ACTUAL FORM DATA
+    """
+    try:
+        supabase = get_supabase_client()
+        context = {
+            'demographics': {},
+            'medications': [],
+            'conditions': [],
+            'allergies': [],
+            'previous_forms': []
+        }
+
+        # 1. Fetch basic demographics from patients table
+        patient_result = supabase.table('patients').select(
+            'name, sex, date_of_birth, age_years, height_cm, weight_kg, current_medications, current_conditions, allergies'
+        ).eq('id', patient_id).single().execute()
+
+        if patient_result.data:
+            patient = patient_result.data
+
+            # Calculate age from date_of_birth if available
+            age_years = patient.get('age_years')
+            if not age_years and patient.get('date_of_birth'):
+                from datetime import datetime
+                dob = datetime.fromisoformat(patient['date_of_birth'].replace('Z', '+00:00'))
+                today = datetime.now()
+                age_years = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+            context['demographics'] = {
+                'name': patient.get('name'),
+                'sex': patient.get('sex'),
+                'age_years': age_years,
+                'date_of_birth': patient.get('date_of_birth'),
+                'height_cm': float(patient['height_cm']) if patient.get('height_cm') else None,
+                'weight_kg': float(patient['weight_kg']) if patient.get('weight_kg') else None
+            }
+
+            # Legacy text fields for medications/conditions/allergies
+            if patient.get('current_medications'):
+                context['medications_text'] = patient['current_medications']
+            if patient.get('current_conditions'):
+                context['conditions_text'] = patient['current_conditions']
+            if patient.get('allergies'):
+                context['allergies_text'] = patient['allergies']
+
+        # 2. Fetch active medications from patient_medications table
+        meds_result = supabase.table('patient_medications').select(
+            'medication_name, dosage, frequency, indication, started_date'
+        ).eq('patient_id', patient_id).eq('status', 'active').execute()
+
+        if meds_result.data:
+            context['medications'] = [
+                {
+                    'name': med['medication_name'],
+                    'dosage': med.get('dosage'),
+                    'frequency': med.get('frequency'),
+                    'indication': med.get('indication'),
+                    'started_date': med.get('started_date')
+                }
+                for med in meds_result.data
+            ]
+
+        # 3. Fetch active medical conditions
+        conditions_result = supabase.table('patient_conditions').select(
+            'condition_name, icd10_code, diagnosed_date, status'
+        ).eq('patient_id', patient_id).in_('status', ['active', 'chronic']).execute()
+
+        if conditions_result.data:
+            context['conditions'] = [
+                {
+                    'name': cond['condition_name'],
+                    'icd10_code': cond.get('icd10_code'),
+                    'diagnosed_date': cond.get('diagnosed_date'),
+                    'status': cond.get('status')
+                }
+                for cond in conditions_result.data
+            ]
+
+        # 4. Fetch active allergies
+        allergies_result = supabase.table('patient_allergies').select(
+            'allergen, allergen_category, reaction, severity'
+        ).eq('patient_id', patient_id).eq('status', 'active').execute()
+
+        if allergies_result.data:
+            context['allergies'] = [
+                {
+                    'allergen': allergy['allergen'],
+                    'category': allergy.get('allergen_category'),
+                    'reaction': allergy.get('reaction'),
+                    'severity': allergy.get('severity')
+                }
+                for allergy in allergies_result.data
+            ]
+
+        # 5. Fetch recent consultation forms WITH ACTUAL DATA (last 10 completed forms)
+        query = supabase.table('consultation_forms').select(
+            'id, form_type, specialty, created_at, form_data, status, appointment_id'
+        ).eq('patient_id', patient_id).eq('status', 'completed')
+
+        # Filter by form_type if specified (for targeted historical aggregation)
+        if form_type:
+            query = query.eq('form_type', form_type)
+            print(f"📋 Filtering previous forms by form_type: {form_type}")
+
+        forms_result = query.order('created_at', desc=True).limit(10).execute()
+
+        if forms_result.data:
+            context['previous_forms'] = [
+                {
+                    'id': form['id'],
+                    'form_type': form['form_type'],
+                    'specialty': form.get('specialty'),
+                    'created_at': form.get('created_at'),
+                    'appointment_id': form.get('appointment_id'),
+                    'form_data': form.get('form_data', {})  # ✅ Include actual data for aggregation!
+                }
+                for form in forms_result.data
+            ]
+            print(f"📋 Fetched {len(context['previous_forms'])} previous forms with data")
+
+        print(f"📋 Fetched patient context: {context['demographics'].get('name')}, "
+              f"{len(context.get('medications', []))} medications, "
+              f"{len(context.get('conditions', []))} conditions, "
+              f"{len(context.get('allergies', []))} allergies")
+
+        return context
+
+    except Exception as e:
+        print(f"⚠️  Error fetching patient context: {e}")
+        # Return empty context rather than failing
+        return {
+            'demographics': {},
+            'medications': [],
+            'conditions': [],
+            'allergies': [],
+            'previous_forms': []
+        }
+
+
+def deep_merge(dict1: dict, dict2: dict) -> dict:
+    """
+    Deep merge two dictionaries, recursively merging nested dicts and arrays.
+
+    Rules:
+    - Scalars in dict2 overwrite dict1
+    - Arrays in dict2 extend (append to) dict1
+    - Nested dicts merge recursively
+
+    Args:
+        dict1: Base dictionary (historical/existing data)
+        dict2: Override dictionary (new/current data)
+
+    Returns:
+        Merged dictionary
+    """
+    result = dict1.copy()
+
+    for key, value in dict2.items():
+        if key in result:
+            existing = result[key]
+
+            # Both are dicts: recurse
+            if isinstance(existing, dict) and isinstance(value, dict):
+                result[key] = deep_merge(existing, value)
+
+            # Both are lists: extend
+            elif isinstance(existing, list) and isinstance(value, list):
+                result[key] = existing + value
+
+            # Otherwise: override
+            else:
+                result[key] = value
+        else:
+            result[key] = value
+
+    return result
+
+
+def extract_historical_field_data(
+    field_schema: dict,
+    previous_forms: list,
+    field_path: str
+) -> list:
+    """
+    Extract historical data for a field marked with requires_previous_consultations.
+
+    Args:
+        field_schema: The field definition with aggregation metadata
+        previous_forms: List of previous consultation form objects
+        field_path: Nested path to the field (e.g., "antenatal_visits.visit_records")
+
+    Returns:
+        List of historical rows (for array fields) or list with single value (for simple fields)
+    """
+    if not field_schema.get('requires_previous_consultations'):
+        return []
+
+    historical_data = []
+
+    # Apply filters
+    filters = field_schema.get('historical_filters', {})
+    filtered_forms = [
+        form for form in previous_forms
+        if all(form.get(k) == v for k, v in filters.items())
+    ]
+
+    print(f"📊 Found {len(filtered_forms)} forms matching filters {filters}")
+
+    # Apply max_historical_records limit
+    max_records = field_schema.get('max_historical_records')
+    if max_records is not None:
+        filtered_forms = filtered_forms[:max_records]
+        print(f"📊 Limited to {max_records} most recent forms")
+
+    # Extract data from each historical form
+    for form in filtered_forms:
+        form_data = form.get('form_data', {})
+
+        # Navigate to nested field using field_path
+        parts = field_path.split('.')
+        value = form_data
+
+        for part in parts:
+            if isinstance(value, dict) and part in value:
+                value = value[part]
+            else:
+                value = None
+                break
+
+        if value is not None:
+            # For array fields, extend the list
+            if field_schema.get('type') == 'array' and isinstance(value, list):
+                historical_data.extend(value)
+            else:
+                # For simple fields, append single value
+                historical_data.append(value)
+
+    print(f"📊 Extracted {len(historical_data)} historical records for {field_path}")
+    return historical_data
+
+
+def aggregate_field_data(
+    current_data: any,
+    historical_data: list,
+    aggregation_strategy: str
+) -> any:
+    """
+    Merge current data with historical data using specified strategy.
+
+    Args:
+        current_data: Data from current consultation (new row)
+        historical_data: Data from previous consultations
+        aggregation_strategy: 'append' | 'replace' | 'merge'
+
+    Returns:
+        Merged data
+    """
+    if aggregation_strategy == 'replace':
+        # Replace historical with current (rare use case)
+        return current_data
+
+    elif aggregation_strategy == 'append':
+        # Append current to historical (most common for visit tracking)
+        if isinstance(historical_data, list):
+            # Ensure current_data is also a list
+            if isinstance(current_data, list):
+                return historical_data + current_data
+            elif current_data is not None:
+                return historical_data + [current_data]
+            else:
+                return historical_data
+        else:
+            return current_data or historical_data
+
+    elif aggregation_strategy == 'merge':
+        # Deep merge objects (useful for nested data)
+        if isinstance(historical_data, dict) and isinstance(current_data, dict):
+            return deep_merge(historical_data, current_data)
+        else:
+            return current_data or historical_data
+
+    else:
+        print(f"⚠️  Unknown aggregation_strategy: {aggregation_strategy}")
+        return current_data
+
+
+async def apply_historical_aggregation(
+    field_updates: dict,
+    schema: dict,
+    patient_context: dict,
+    form_type: str,
+    patient_id: str = None
+) -> dict:
+    """
+    Apply historical consultation aggregation to fields marked with
+    requires_previous_consultations.
+
+    Args:
+        field_updates: Current field updates from LLM extraction {nested_path: value}
+        schema: Full form schema from database
+        patient_context: Patient context (may not have previous_forms yet)
+        form_type: Current form type (e.g., 'antenatal')
+        patient_id: Optional patient ID to fetch previous forms if not in context
+
+    Returns:
+        Enhanced field_updates with historical data aggregated
+    """
+    # Fetch previous forms if not already in context
+    previous_forms = patient_context.get('previous_forms', [])
+
+    if not previous_forms:
+        # Try to get patient_id from context if not provided
+        if not patient_id:
+            patient_id = patient_context.get('demographics', {}).get('patient_id')
+
+        if patient_id:
+            print(f"📋 Fetching previous {form_type} forms for aggregation")
+            enhanced_context = fetch_patient_context(patient_id, form_type=form_type)
+            previous_forms = enhanced_context.get('previous_forms', [])
+
+    if not previous_forms:
+        print(f"📋 No previous forms found, skipping aggregation")
+        return field_updates
+
+    print(f"📋 Applying historical aggregation with {len(previous_forms)} previous forms")
+
+    aggregated_updates = {}
+
+    # Iterate through schema to find fields with requires_previous_consultations
+    for section_name, section_def in schema.items():
+        if not isinstance(section_def, dict):
+            continue
+
+        fields = section_def.get('fields', [])
+        if not isinstance(fields, list):
+            continue
+
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+
+            field_name = field.get('name')
+            if not field_name:
+                continue
+
+            # Check if this field requires historical aggregation
+            if not field.get('requires_previous_consultations'):
+                continue
+
+            field_path = f"{section_name}.{field_name}"
+            print(f"📊 Processing aggregation for: {field_path}")
+
+            # Extract historical data
+            historical_data = extract_historical_field_data(
+                field_schema=field,
+                previous_forms=previous_forms,
+                field_path=field_path
+            )
+
+            # Get current data (if any) from field_updates
+            current_data = field_updates.get(field_path)
+
+            # Aggregate using specified strategy
+            aggregation_strategy = field.get('aggregation_strategy', 'append')
+            aggregated_value = aggregate_field_data(
+                current_data=current_data,
+                historical_data=historical_data,
+                aggregation_strategy=aggregation_strategy
+            )
+
+            # Store aggregated result
+            if aggregated_value is not None:
+                aggregated_updates[field_path] = aggregated_value
+                print(f"✅ Aggregated {field_path}: {len(aggregated_value) if isinstance(aggregated_value, list) else 'single value'}")
+
+    # Merge aggregated updates back into field_updates
+    final_updates = {**field_updates, **aggregated_updates}
+
+    print(f"📊 Aggregation complete: {len(aggregated_updates)} fields enhanced")
+    return final_updates
+
+
+def exclude_existing_fields_smart(field_updates: dict, current_form_state: dict) -> dict:
+    """
+    Exclude fields that already have data in current form state.
+
+    ENHANCED: For array fields with aggregated data, DO NOT exclude
+    because we want to show aggregated historical + current data.
+
+    Args:
+        field_updates: Extracted field updates {nested_path: value}
+        current_form_state: Current form data from database
+
+    Returns:
+        Filtered field_updates
+    """
+    filtered = {}
+
+    for field_path, new_value in field_updates.items():
+        # Navigate to existing value
+        parts = field_path.split('.')
+        existing_value = current_form_state
+
+        for part in parts:
+            if isinstance(existing_value, dict) and part in existing_value:
+                existing_value = existing_value[part]
+            else:
+                existing_value = None
+                break
+
+        # Include field if:
+        # 1. No existing value
+        # 2. New value is an array (likely aggregated historical data)
+        # 3. Existing value is different from new value
+
+        if existing_value is None:
+            filtered[field_path] = new_value
+        elif isinstance(new_value, list):
+            # Always include arrays (aggregated data)
+            filtered[field_path] = new_value
+        elif existing_value != new_value:
+            filtered[field_path] = new_value
+        else:
+            print(f"⏭️  Skipping {field_path}: already has value {existing_value}")
+
+    return filtered
 
 
 # @lru_cache(maxsize=32)  # DISABLED: Need fresh data from custom_forms table
