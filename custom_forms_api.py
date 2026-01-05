@@ -647,6 +647,97 @@ async def preview_saved_form_pdf(
         raise HTTPException(status_code=500, detail=f"Failed to generate PDF preview: {str(e)}")
 
 
+@router.get("/forms/browse")
+async def browse_forms_to_add(
+    specialty: Optional[str] = None,
+    search: Optional[str] = None,
+    authorization: str = Header(..., description="Bearer token")
+):
+    """
+    Browse all public forms that can be added to "My Forms".
+    Excludes forms already in the doctor's library (owned or adopted).
+
+    Args:
+        specialty: Optional filter by specialty
+        search: Optional search in form name or description
+        authorization: Firebase JWT token in Authorization header
+
+    Returns:
+        Dict with available forms to add
+    """
+    try:
+        # Verify Firebase authentication and get user ID
+        user_id = verify_firebase_token_and_get_user_id(authorization)
+
+        from supabase import create_client, Client
+
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+        supabase: Client = create_client(supabase_url, supabase_key)
+
+        # Get all public active forms
+        query = supabase.table("custom_forms")\
+            .select("*")\
+            .eq("is_public", True)\
+            .eq("status", "active")
+
+        if specialty:
+            query = query.eq("specialty", specialty)
+
+        all_public = query.execute()
+        all_public_forms = all_public.data or []
+
+        # Get doctor's UUID
+        doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
+        if not doctor_result.data:
+            raise HTTPException(status_code=404, detail="Doctor profile not found")
+
+        doctor_id = doctor_result.data.get('id')
+
+        # Get forms already in doctor's library (owned + adopted)
+        owned = supabase.table("custom_forms")\
+            .select("id")\
+            .eq("created_by", user_id)\
+            .execute()
+
+        adopted = supabase.table("doctor_adopted_forms")\
+            .select("form_id")\
+            .eq("doctor_id", doctor_id)\
+            .execute()
+
+        library_form_ids = set(
+            [f['id'] for f in (owned.data or [])] +
+            [a['form_id'] for a in (adopted.data or [])]
+        )
+
+        # Filter out forms already in library
+        available_forms = [
+            form for form in all_public_forms
+            if form['id'] not in library_form_ids
+        ]
+
+        # Optional search filter
+        if search:
+            search_lower = search.lower()
+            available_forms = [
+                form for form in available_forms
+                if search_lower in form.get('form_name', '').lower()
+                or search_lower in (form.get('description') or '').lower()
+            ]
+
+        return {
+            "success": True,
+            "forms": available_forms,
+            "total": len(available_forms)
+        }
+
+    except Exception as e:
+        print(f"❌ Error browsing forms: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/forms/{form_id}", response_model=CustomFormResponse)
 async def get_custom_form(
     form_id: str,
@@ -1078,98 +1169,6 @@ async def get_public_custom_forms(specialty: Optional[str] = None):
     except Exception as e:
         print(f"❌ Error getting public forms: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/forms/browse")
-async def browse_forms_to_add(
-    specialty: Optional[str] = None,
-    search: Optional[str] = None,
-    authorization: str = Header(..., description="Bearer token")
-):
-    """
-    Browse all public forms that can be added to "My Forms".
-    Excludes forms already in the doctor's library (owned or adopted).
-
-    Args:
-        specialty: Optional filter by specialty
-        search: Optional search in form name or description
-        authorization: Firebase JWT token in Authorization header
-
-    Returns:
-        Dict with available forms to add
-    """
-    try:
-        # Verify Firebase authentication and get user ID
-        user_id = verify_firebase_token_and_get_user_id(authorization)
-
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
-
-        # Get all public active forms
-        query = supabase.table("custom_forms")\
-            .select("*")\
-            .eq("is_public", True)\
-            .eq("status", "active")
-
-        if specialty:
-            query = query.eq("specialty", specialty)
-
-        all_public = query.execute()
-        all_public_forms = all_public.data or []
-
-        # Get doctor's UUID
-        doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
-        if not doctor_result.data:
-            raise HTTPException(status_code=404, detail="Doctor profile not found")
-
-        doctor_id = doctor_result.data.get('id')
-
-        # Get forms already in doctor's library (owned + adopted)
-        owned = supabase.table("custom_forms")\
-            .select("id")\
-            .eq("created_by", user_id)\
-            .execute()
-
-        adopted = supabase.table("doctor_adopted_forms")\
-            .select("form_id")\
-            .eq("doctor_id", doctor_id)\
-            .execute()
-
-        library_form_ids = set(
-            [f['id'] for f in (owned.data or [])] +
-            [a['form_id'] for a in (adopted.data or [])]
-        )
-
-        # Filter out forms already in library
-        available_forms = [
-            form for form in all_public_forms
-            if form['id'] not in library_form_ids
-        ]
-
-        # Optional search filter
-        if search:
-            search_lower = search.lower()
-            available_forms = [
-                form for form in available_forms
-                if search_lower in form.get('form_name', '').lower()
-                or search_lower in (form.get('description') or '').lower()
-            ]
-
-        return {
-            "success": True,
-            "forms": available_forms,
-            "total": len(available_forms)
-        }
-
-    except Exception as e:
-        print(f"❌ Error browsing forms: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.post("/forms/{form_id}/adopt")
 async def adopt_form_to_library(
