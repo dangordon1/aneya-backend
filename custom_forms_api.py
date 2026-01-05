@@ -57,7 +57,7 @@ class CustomFormResponse(BaseModel):
     form_name: str
     specialty: str
     description: Optional[str]
-    patient_criteria: str  # Required - describes which patients this form is for
+    patient_criteria: Optional[str] = None  # Optional - describes which patients this form is for
     created_by: str
     is_public: bool
     status: str
@@ -1783,36 +1783,8 @@ async def get_public_custom_forms(specialty: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{form_id}")
-async def get_custom_form(form_id: str):
-    """Get detailed information about a specific custom form"""
-    try:
-        user_id = get_current_user_id()
-
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
-
-        response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
-
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Form not found")
-
-        form = response.data[0]
-
-        # Check permissions (owner or public form)
-        if form['created_by'] != user_id and not form['is_public']:
-            raise HTTPException(status_code=403, detail="Access denied")
-
-        return form
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error getting custom form: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+# REMOVED: Duplicate catch-all endpoint that was conflicting with specific routes
+# The proper endpoint is at line 1402: @router.get("/forms/{form_id}", ...)
 
 
 @router.patch("/{form_id}/activate")
