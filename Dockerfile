@@ -27,7 +27,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY api.py .
+COPY pdf_generator.py .
+COPY custom_forms_api.py .
+COPY historical_forms_api.py .
+COPY doctor_logo_api.py .
 COPY servers/ ./servers/
+COPY services/ ./services/
+COPY mcp_servers/ ./mcp_servers/
+COPY tools/ ./tools/
+COPY migrations/ ./migrations/
 
 # Create a non-root user
 RUN useradd -m -u 1000 aneya && chown -R aneya:aneya /app
