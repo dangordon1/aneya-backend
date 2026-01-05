@@ -5135,16 +5135,30 @@ def extract_historical_field_data(
     for form in filtered_forms:
         form_data = form.get('form_data', {})
 
-        # Navigate to nested field using field_path
-        parts = field_path.split('.')
-        value = form_data
+        # Try two approaches to find the data:
+        # 1. NESTED structure: {"antenatal_visits": {"visit_records": [...]}}
+        # 2. FLAT structure: {"antenatal_visits.visit_records": [...]}
 
-        for part in parts:
-            if isinstance(value, dict) and part in value:
-                value = value[part]
-            else:
-                value = None
-                break
+        value = None
+
+        # First try flat structure (direct key lookup)
+        if field_path in form_data:
+            value = form_data[field_path]
+            print(f"   Found data in FLAT structure: {field_path}")
+        else:
+            # Try nested structure (navigate through parts)
+            parts = field_path.split('.')
+            value = form_data
+
+            for part in parts:
+                if isinstance(value, dict) and part in value:
+                    value = value[part]
+                else:
+                    value = None
+                    break
+
+            if value is not None:
+                print(f"   Found data in NESTED structure: {field_path}")
 
         if value is not None:
             # For array fields, extend the list
