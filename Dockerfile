@@ -32,10 +32,10 @@ COPY custom_forms_api.py .
 COPY historical_forms_api.py .
 COPY doctor_logo_api.py .
 COPY servers/ ./servers/
-COPY services/ ./services/
 COPY mcp_servers/ ./mcp_servers/
 COPY tools/ ./tools/
 COPY migrations/ ./migrations/
+COPY historical_forms/ ./historical_forms/
 
 # Create a non-root user
 RUN useradd -m -u 1000 aneya && chown -R aneya:aneya /app
