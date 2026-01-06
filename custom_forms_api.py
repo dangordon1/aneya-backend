@@ -386,10 +386,7 @@ async def save_custom_form(
         print(f"✅ Validated schema: {section_count} sections, {field_count} fields")
 
         # Connect to Supabase
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # NEW: Classify tables after doctor review
         print(f"\n🔍 Classifying tables for data source detection...")
@@ -604,10 +601,7 @@ async def preview_saved_form_pdf(
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
         # Fetch form from database
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
 
@@ -669,11 +663,7 @@ async def browse_forms_to_add(
         # Verify Firebase authentication and get user ID
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Get all public active forms
         query = supabase.table("custom_forms")\
@@ -758,10 +748,7 @@ async def get_custom_form(
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
         # Connect to Supabase
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Fetch form
         response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
@@ -820,10 +807,7 @@ async def delete_custom_form(
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
         # Connect to Supabase
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Check if form exists and user owns it
         form_response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
@@ -870,10 +854,7 @@ async def update_custom_form(
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
         # Connect to Supabase
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Check if form exists and user owns it
         form_response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
@@ -964,10 +945,7 @@ async def share_custom_form(
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
         # Connect to Supabase
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Check if form exists and user owns it
         form_response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
@@ -1035,11 +1013,7 @@ async def get_my_forms_library(
         # Verify Firebase authentication and get user ID
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Get doctor's UUID and specialty for auto-adoption
         doctor_result = supabase.table("doctors").select("id, specialty").eq("user_id", user_id).single().execute()
@@ -1134,11 +1108,7 @@ async def get_public_custom_forms(specialty: Optional[str] = None):
         List of public custom forms
     """
     try:
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         query = supabase.table("custom_forms").select("*").eq("is_public", True).eq("status", "active")
 
@@ -1189,11 +1159,7 @@ async def adopt_form_to_library(
         # Verify Firebase authentication and get user ID
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Get doctor's UUID
         doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
@@ -1283,11 +1249,7 @@ async def remove_form_from_library(
         # Verify Firebase authentication and get user ID
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Get doctor's UUID
         doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
@@ -1349,11 +1311,7 @@ async def activate_custom_form(form_id: str):
     try:
         user_id = get_current_user_id()
 
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Verify ownership
         form_response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
@@ -1384,11 +1342,7 @@ async def delete_custom_form(form_id: str):
     try:
         user_id = get_current_user_id()
 
-        from supabase import create_client, Client
-
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Verify ownership and draft status
         form_response = supabase.table("custom_forms").select("*").eq("id", form_id).execute()
@@ -1506,10 +1460,7 @@ async def download_filled_form_pdf(filled_form_id: str):
         from pdf_generator import generate_custom_form_pdf
 
         # Connect to Supabase
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         # Fetch filled form
         filled_form_response = supabase.table("filled_forms")\
@@ -1623,10 +1574,7 @@ async def select_form_for_consultation(
         user_id = verify_firebase_token_and_get_user_id(authorization)
 
         # Connect to Supabase
-        from supabase import create_client, Client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
-        supabase: Client = create_client(supabase_url, supabase_key)
+        supabase = get_supabase_client()
 
         print(f"\n🔍 Selecting form for specialty: {specialty}")
         print(f"👤 Patient context: {patient_context[:100]}...")
