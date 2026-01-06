@@ -4419,9 +4419,12 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
 
         conversation_text = "\n".join(conversation_lines)
 
-        # ✨ NEW: Fetch schema from database
-        schema = get_form_schema_from_db(request.form_type)
+        # ✨ NEW: Fetch schema and table_metadata from database
+        schema_data = get_form_schema_from_db(request.form_type, full_metadata=True)
+        schema = schema_data.get('schema', schema_data)  # Handle both formats
+        table_metadata = schema_data.get('table_metadata', {})
         print(f"📊 Using schema from database for {request.form_type}")
+        print(f"📊 Table metadata: {len(table_metadata.get('tables', {}) if isinstance(table_metadata, dict) else 0)} tables classified")
 
         # ✨ NEW: Flatten schema for LLM extraction
         flattened_schema, field_mapping = flatten_schema_for_extraction(schema)
@@ -4581,6 +4584,7 @@ Extract all relevant clinical data as JSON:
         print(f"   After mapping: {field_updates}")
 
         # ✨ NEW: Apply historical consultation aggregation for fields marked with requires_previous_consultations
+        # Now also uses table_metadata to identify tables needing historical data aggregation
         patient_id = request.patient_context.get('demographics', {}).get('patient_id') or request.patient_context.get('patient_id')
         field_updates = await apply_historical_aggregation(
             field_updates=field_updates,
@@ -4588,7 +4592,8 @@ Extract all relevant clinical data as JSON:
             patient_context=request.patient_context,
             form_type=request.form_type,
             patient_id=patient_id,
-            current_appointment_id=request.appointment_id  # Exclude current appointment from aggregation
+            current_appointment_id=request.appointment_id,  # Exclude current appointment from aggregation
+            table_metadata=table_metadata  # Table classification from form upload
         )
         print(f"📝 After historical aggregation: {len(field_updates)} fields")
 
@@ -5226,11 +5231,12 @@ async def apply_historical_aggregation(
     patient_context: dict,
     form_type: str,
     patient_id: str = None,
-    current_appointment_id: str = None
+    current_appointment_id: str = None,
+    table_metadata: dict = None
 ) -> dict:
     """
     Apply historical consultation aggregation to fields marked with
-    requires_previous_consultations.
+    requires_previous_consultations OR identified via table_metadata classification.
 
     Args:
         field_updates: Current field updates from LLM extraction {nested_path: value}
@@ -5239,6 +5245,7 @@ async def apply_historical_aggregation(
         form_type: Current form type (e.g., 'antenatal')
         patient_id: Optional patient ID to fetch previous forms if not in context
         current_appointment_id: Appointment ID to EXCLUDE from aggregation (avoid duplicates)
+        table_metadata: Table classification metadata from TableClassifier (includes data_source_type)
 
     Returns:
         Enhanced field_updates with historical data aggregated
@@ -5294,7 +5301,25 @@ async def apply_historical_aggregation(
                 continue
 
             # Check if this field requires historical aggregation
-            if not field.get('requires_previous_consultations'):
+            requires_aggregation = field.get('requires_previous_consultations')
+
+            # ALSO check table_metadata for tables classified as needing historical data
+            if not requires_aggregation and table_metadata:
+                # table_metadata structure: {"tables": {"field_name": {"data_source_type": "...", ...}}}
+                tables_info = table_metadata.get('tables', {}) if isinstance(table_metadata, dict) else {}
+                table_info = tables_info.get(field_name, {})
+                data_source_type = table_info.get('data_source_type')
+
+                # These data_source_types indicate historical data is needed
+                historical_types = [
+                    'visit_history', 'lab_results', 'scan_results',
+                    'medication_history', 'vitals_history', 'vaccination_records'
+                ]
+                if data_source_type in historical_types or table_info.get('references_previous_consultation'):
+                    requires_aggregation = True
+                    print(f"📊 Table '{field_name}' needs aggregation (data_source_type: {data_source_type})")
+
+            if not requires_aggregation:
                 continue
 
             field_path = f"{section_name}.{field_name}"
@@ -5393,7 +5418,7 @@ def _get_form_schema_from_db_cached(form_type: str, full_metadata: bool = False)
 
         # Query ALL forms (active and draft) and filter manually
         result = supabase.table('custom_forms')\
-            .select('form_schema, version, description, specialty, form_name, updated_at, status')\
+            .select('form_schema, table_metadata, version, description, specialty, form_name, updated_at, status')\
             .in_('status', ['active', 'draft'])\
             .execute()
 
@@ -5448,6 +5473,7 @@ def _get_form_schema_from_db_cached(form_type: str, full_metadata: bool = False)
             # Return all metadata for frontend
             return {
                 'schema': form_data['form_schema'],
+                'table_metadata': form_data.get('table_metadata', {}),  # Table classification data
                 'title': form_data.get('description', ''),
                 'description': form_data.get('description', ''),
                 'version': form_data.get('version', 1),
