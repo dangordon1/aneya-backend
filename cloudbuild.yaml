@@ -38,6 +38,7 @@ steps:
       - '--min-instances=0'
       - '--max-instances=10'
       - '--set-env-vars=GIT_BRANCH=$BRANCH_NAME'
+      - '--update-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,ELEVENLABS_API_KEY=ELEVENLABS_API_KEY:latest,SCRAPEOPS_API_KEY=SCRAPEOPS_API_KEY:latest,SARVAM_API_KEY=SARVAM_API_KEY:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY
