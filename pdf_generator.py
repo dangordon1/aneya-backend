@@ -1,30 +1,236 @@
 """
 PDF Generator for Consultation Forms
 
-This module generates PDF reports for consultations, including:
+This module generates beautiful, modern PDF reports for consultations, including:
 - Appointment details
 - Patient information
 - Consultation form data (all form types)
+
+Design Philosophy:
+- Modern, minimalist aesthetic with medical professionalism
+- AI-forward design language with clean geometric elements
+- Strong visual hierarchy for enhanced readability
+- Trust-building color palette (deep blues, soft teals)
 """
 
 from io import BytesIO
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
+from reportlab.lib.units import cm, mm
 from reportlab.pdfgen import canvas
-from reportlab.lib.colors import HexColor
+from reportlab.lib.colors import HexColor, Color
 from reportlab.lib.utils import ImageReader
 from typing import Dict, Any, Optional
 import requests
 
 
-# Aneya color scheme
-ANEYA_NAVY = HexColor('#0c3555')
-ANEYA_TEAL = HexColor('#1d9e99')
-ANEYA_GRAY = HexColor('#6b7280')
-ANEYA_LIGHT_GRAY = HexColor('#d1d5db')
-ANEYA_CREAM = HexColor('#f6f5ee')
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODERN COLOR PALETTE - "AI Medical" Theme
+# ═══════════════════════════════════════════════════════════════════════════════
 
+# Primary colors - Deep, trustworthy navy with modern undertones
+ANEYA_NAVY = HexColor('#0f172a')           # Deep slate navy (headers, titles)
+ANEYA_NAVY_LIGHT = HexColor('#1e3a5f')     # Lighter navy (section backgrounds)
+
+# Accent colors - Modern teal/cyan for a futuristic medical feel
+ANEYA_TEAL = HexColor('#0d9488')           # Primary teal (accents, highlights)
+ANEYA_TEAL_LIGHT = HexColor('#5eead4')     # Light teal (subtle accents)
+ANEYA_CYAN = HexColor('#22d3ee')           # Bright cyan (special highlights)
+
+# Text colors - Warm grays for better readability
+ANEYA_GRAY = HexColor('#374151')           # Primary text (dark gray)
+ANEYA_GRAY_MEDIUM = HexColor('#6b7280')    # Secondary text
+ANEYA_GRAY_LIGHT = HexColor('#9ca3af')     # Tertiary text
+
+# Background colors - Subtle, calming tones
+ANEYA_LIGHT_GRAY = HexColor('#e5e7eb')     # Borders, dividers
+ANEYA_CREAM = HexColor('#f8fafc')          # Alternating rows (very light)
+ANEYA_WHITE = HexColor('#ffffff')          # Pure white
+ANEYA_BG_SUBTLE = HexColor('#f1f5f9')      # Subtle background
+
+# Status/semantic colors
+ANEYA_SUCCESS = HexColor('#10b981')        # Green for positive indicators
+ANEYA_WARNING = HexColor('#f59e0b')        # Amber for warnings
+ANEYA_INFO = HexColor('#3b82f6')           # Blue for info
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TYPOGRAPHY CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Font sizes for strong visual hierarchy
+FONT_TITLE = 24                            # Main document title
+FONT_SUBTITLE = 14                         # Subtitles, dates
+FONT_SECTION_HEADER = 13                   # Section headers
+FONT_SUBSECTION = 11                       # Subsection headers
+FONT_LABEL = 9                             # Field labels
+FONT_VALUE = 10                            # Field values
+FONT_SMALL = 8                             # Footer, captions
+FONT_TABLE_HEADER = 8                      # Table headers
+FONT_TABLE_CELL = 8                        # Table cell content
+
+# Line heights and spacing
+LINE_HEIGHT = 0.45 * cm                    # Standard line height
+SECTION_SPACING = 0.8 * cm                 # Space between sections
+FIELD_SPACING = 0.4 * cm                   # Space between fields
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYOUT CONSTANTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Page margins (generous for modern feel)
+MARGIN_TOP = 2.2 * cm
+MARGIN_BOTTOM = 2.5 * cm
+MARGIN_LEFT = 2 * cm
+MARGIN_RIGHT = 2 * cm
+
+# Content area
+CONTENT_WIDTH = A4[0] - MARGIN_LEFT - MARGIN_RIGHT
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DECORATIVE HELPER FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def draw_gradient_rect(c: canvas.Canvas, x: float, y: float, width: float, height: float,
+                       color_start: Color, color_end: Color, steps: int = 50) -> None:
+    """
+    Draw a vertical gradient rectangle (simulated with horizontal stripes).
+    Creates a subtle gradient effect from color_start (top) to color_end (bottom).
+    """
+    step_height = height / steps
+
+    for i in range(steps):
+        # Interpolate color
+        ratio = i / steps
+        r = color_start.red + (color_end.red - color_start.red) * ratio
+        g = color_start.green + (color_end.green - color_start.green) * ratio
+        b = color_start.blue + (color_end.blue - color_start.blue) * ratio
+
+        c.setFillColor(Color(r, g, b))
+        c.rect(x, y - (i + 1) * step_height, width, step_height + 0.5, fill=1, stroke=0)
+
+
+def draw_subtle_line(c: canvas.Canvas, x1: float, y1: float, x2: float, y2: float,
+                     color: Color = ANEYA_LIGHT_GRAY, width: float = 0.5) -> None:
+    """Draw a subtle decorative line."""
+    c.setStrokeColor(color)
+    c.setLineWidth(width)
+    c.line(x1, y1, x2, y2)
+
+
+def draw_accent_bar(c: canvas.Canvas, x: float, y: float, width: float, height: float,
+                    color: Color = ANEYA_TEAL) -> None:
+    """Draw a thin accent bar (used for visual emphasis)."""
+    c.setFillColor(color)
+    c.rect(x, y, width, height, fill=1, stroke=0)
+
+
+def draw_rounded_rect(c: canvas.Canvas, x: float, y: float, width: float, height: float,
+                      radius: float = 3*mm, fill_color: Color = None,
+                      stroke_color: Color = None, stroke_width: float = 0.5) -> None:
+    """
+    Draw a rectangle with rounded corners.
+    Creates a modern card-like appearance.
+    """
+    path = c.beginPath()
+
+    # Start from bottom-left, going clockwise
+    path.moveTo(x + radius, y)
+    path.lineTo(x + width - radius, y)
+    path.arcTo(x + width - radius, y, x + width, y + radius, radius)
+    path.lineTo(x + width, y + height - radius)
+    path.arcTo(x + width, y + height - radius, x + width - radius, y + height, radius)
+    path.lineTo(x + radius, y + height)
+    path.arcTo(x + radius, y + height, x, y + height - radius, radius)
+    path.lineTo(x, y + radius)
+    path.arcTo(x, y + radius, x + radius, y, radius)
+    path.close()
+
+    if fill_color:
+        c.setFillColor(fill_color)
+    if stroke_color:
+        c.setStrokeColor(stroke_color)
+        c.setLineWidth(stroke_width)
+
+    if fill_color and stroke_color:
+        c.drawPath(path, fill=1, stroke=1)
+    elif fill_color:
+        c.drawPath(path, fill=1, stroke=0)
+    elif stroke_color:
+        c.drawPath(path, fill=0, stroke=1)
+
+
+def draw_decorative_dots(c: canvas.Canvas, x: float, y: float,
+                         count: int = 3, spacing: float = 4*mm,
+                         radius: float = 1*mm, color: Color = ANEYA_TEAL_LIGHT) -> None:
+    """Draw a row of decorative dots (subtle AI/tech aesthetic)."""
+    c.setFillColor(color)
+    for i in range(count):
+        c.circle(x + i * spacing, y, radius, fill=1, stroke=0)
+
+
+def draw_header_decoration(c: canvas.Canvas, width: float, height: float,
+                           primary_color: Color = ANEYA_NAVY,
+                           accent_color: Color = ANEYA_TEAL) -> float:
+    """
+    Draw a modern, elegant header decoration at the top of the page.
+    Returns the Y position after the header decoration.
+    """
+    page_width, page_height = A4
+
+    # Subtle gradient header bar at very top
+    header_height = 8 * mm
+    draw_gradient_rect(c, 0, page_height - header_height, page_width, header_height,
+                       primary_color, ANEYA_NAVY_LIGHT, steps=30)
+
+    # Thin accent line below header
+    draw_accent_bar(c, 0, page_height - header_height - 1*mm, page_width, 1*mm, accent_color)
+
+    return page_height - header_height - 1*mm - MARGIN_TOP
+
+
+def draw_page_footer(c: canvas.Canvas, page_num: int, total_pages: int = None,
+                     primary_color: Color = ANEYA_NAVY,
+                     accent_color: Color = ANEYA_TEAL) -> None:
+    """
+    Draw a modern footer with page numbers and branding.
+    """
+    page_width, page_height = A4
+    footer_y = MARGIN_BOTTOM - 0.5*cm
+
+    # Subtle line above footer
+    draw_subtle_line(c, MARGIN_LEFT, footer_y + 0.8*cm,
+                     page_width - MARGIN_RIGHT, footer_y + 0.8*cm,
+                     ANEYA_LIGHT_GRAY, 0.3)
+
+    # Left side: Aneya branding with subtle styling
+    c.setFillColor(ANEYA_GRAY_MEDIUM)
+    c.setFont("Helvetica", FONT_SMALL)
+    c.drawString(MARGIN_LEFT, footer_y + 0.3*cm, "Powered by")
+
+    c.setFillColor(primary_color)
+    c.setFont("Helvetica-Bold", FONT_SMALL)
+    c.drawString(MARGIN_LEFT + 2.2*cm, footer_y + 0.3*cm, "Aneya")
+
+    # Small accent dot
+    c.setFillColor(accent_color)
+    c.circle(MARGIN_LEFT + 3.2*cm, footer_y + 0.45*cm, 1*mm, fill=1, stroke=0)
+
+    # Center: Confidentiality notice
+    c.setFillColor(ANEYA_GRAY_LIGHT)
+    c.setFont("Helvetica", 7)
+    c.drawCentredString(page_width/2, footer_y, "Confidential Medical Document")
+
+    # Right side: Page number with modern styling
+    c.setFillColor(ANEYA_GRAY_MEDIUM)
+    c.setFont("Helvetica", FONT_SMALL)
+    if total_pages:
+        page_text = f"Page {page_num} of {total_pages}"
+    else:
+        page_text = f"Page {page_num}"
+    c.drawRightString(page_width - MARGIN_RIGHT, footer_y + 0.3*cm, page_text)
 
 
 
@@ -189,14 +395,18 @@ def format_date_time(iso_string: str) -> str:
         return iso_string
 
 
-def render_clinic_logo(c: canvas.Canvas, y: float, logo_url: str) -> bool:
+def render_clinic_logo(c: canvas.Canvas, x: float, y: float, logo_url: str,
+                       max_width: float = 4.5*cm, max_height: float = 1.8*cm) -> bool:
     """
-    Download clinic logo from GCS and render in top-right corner
+    Download clinic logo from GCS and render at specified position.
 
     Args:
         c: ReportLab canvas
-        y: Current Y position
+        x: X position for logo
+        y: Y position for logo (top of logo)
         logo_url: Public URL of the clinic logo
+        max_width: Maximum logo width
+        max_height: Maximum logo height
 
     Returns:
         bool: True if logo rendered successfully, False otherwise
@@ -210,20 +420,15 @@ def render_clinic_logo(c: canvas.Canvas, y: float, logo_url: str) -> bool:
         image_bytes = BytesIO(response.content)
         img = ImageReader(image_bytes)
 
-        # Calculate scaling to fit within 50mm x 20mm (reduced from 70mm x 28mm)
+        # Calculate scaling to fit within constraints
         img_width, img_height = img.getSize()
-        max_width, max_height = 5*cm, 2*cm
         scale = min(max_width/img_width, max_height/img_height)
 
         scaled_width = img_width * scale
         scaled_height = img_height * scale
 
-        # Position in top-right corner with whitespace from top
-        x_pos = 19*cm - scaled_width
-        y_pos = y - 0.5*cm  # Positioned with proper whitespace from top
-
         # Draw image
-        c.drawImage(img, x_pos, y_pos,
+        c.drawImage(img, x, y - scaled_height,
                    width=scaled_width,
                    height=scaled_height,
                    preserveAspectRatio=True,
@@ -234,265 +439,495 @@ def render_clinic_logo(c: canvas.Canvas, y: float, logo_url: str) -> bool:
 
     except Exception as e:
         print(f"⚠️  Failed to render clinic logo: {e}")
-        return False  # Graceful fallback
+        return False
 
 
 def render_header(c: canvas.Canvas, y: float, doctor_info: Optional[Dict[str, Any]] = None,
-                 primary_color=ANEYA_NAVY, text_color=ANEYA_GRAY) -> float:
+                 primary_color=ANEYA_NAVY, text_color=ANEYA_GRAY,
+                 accent_color=ANEYA_TEAL, title: str = "Consultation Report") -> float:
     """
-    Render the PDF header with title, generation date, and optional clinic logo
+    Render a modern, elegant PDF header with gradient decoration,
+    title, generation date, and optional clinic logo.
 
     Args:
         c: ReportLab canvas
-        y: Current Y position
+        y: Current Y position (ignored - header starts at top)
         doctor_info: Optional dict with clinic_name and clinic_logo_url
         primary_color: Primary color for title
         text_color: Text color for date
+        accent_color: Accent color for decorative elements
+        title: Document title
 
     Returns:
-        float: Updated Y position
+        float: Updated Y position after header
     """
     width, height = A4
 
-    # Try to render clinic logo if available
+    # Draw decorative header bar at top of page
+    y = draw_header_decoration(c, width, height, primary_color, accent_color)
+
+    # === Document Title Section ===
+    # Main title with elegant typography
+    c.setFillColor(primary_color)
+    c.setFont("Helvetica-Bold", FONT_TITLE)
+    c.drawString(MARGIN_LEFT, y, title)
+
+    # Try to render clinic logo on the right
     logo_rendered = False
     if doctor_info and doctor_info.get('clinic_logo_url'):
-        logo_rendered = render_clinic_logo(c, y, doctor_info['clinic_logo_url'])
+        logo_x = width - MARGIN_RIGHT - 4.5*cm
+        logo_rendered = render_clinic_logo(c, logo_x, y + 0.3*cm, doctor_info['clinic_logo_url'])
 
-    # Fallback to clinic name as text if no logo rendered
+    # Fallback to clinic name as elegant text if no logo rendered
     if not logo_rendered and doctor_info and doctor_info.get('clinic_name'):
         c.setFillColor(primary_color)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawRightString(19*cm, y + 0.5*cm, doctor_info['clinic_name'])
+        c.setFont("Helvetica-Bold", 11)
+        c.drawRightString(width - MARGIN_RIGHT, y, doctor_info['clinic_name'])
 
-    # Title
-    c.setFillColor(primary_color)
-    c.setFont("Helvetica-Bold", 20)
-    c.drawCentredString(width/2, y, "Consultation Report")
-    y -= 0.5*cm
+    y -= 0.7*cm
 
-    # Generation date
-    c.setFillColor(text_color)
-    c.setFont("Helvetica", 10)
+    # Generation date with subtle styling
+    c.setFillColor(ANEYA_GRAY_MEDIUM)
+    c.setFont("Helvetica", FONT_SUBTITLE - 2)
     generation_date = datetime.now().strftime('%d %B %Y at %H:%M')
-    c.drawCentredString(width/2, y, f"Generated: {generation_date}")
-    y -= 1.5*cm
+    c.drawString(MARGIN_LEFT, y, f"Generated: {generation_date}")
+
+    # Decorative dots after date
+    date_width = c.stringWidth(f"Generated: {generation_date}", "Helvetica", FONT_SUBTITLE - 2)
+    draw_decorative_dots(c, MARGIN_LEFT + date_width + 0.5*cm, y + 0.15*cm,
+                        count=3, spacing=3*mm, radius=0.8*mm, color=accent_color)
+
+    y -= 1.2*cm
+
+    # Subtle separator line
+    draw_subtle_line(c, MARGIN_LEFT, y + 0.3*cm, width - MARGIN_RIGHT, y + 0.3*cm,
+                    ANEYA_LIGHT_GRAY, 0.5)
+
+    y -= 0.4*cm
 
     return y
 
 
 def render_section_header(c: canvas.Canvas, title: str, y: float,
-                         primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL) -> float:
-    """Render a section header"""
-    c.setFillColor(primary_color)
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(2*cm, y, title)
-    y -= 0.2*cm
+                         primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL,
+                         with_background: bool = True) -> float:
+    """
+    Render a modern section header with optional subtle background.
 
-    # Underline
-    c.setStrokeColor(accent_color)
-    c.setLineWidth(2)
-    c.line(2*cm, y, 19*cm, y)
-    y -= 0.6*cm
+    Features:
+    - Subtle rounded background for visual grouping
+    - Accent bar on the left for emphasis
+    - Clean typography with good spacing
+
+    Args:
+        c: ReportLab canvas
+        title: Section title
+        y: Current Y position
+        primary_color: Primary color for text
+        accent_color: Accent color for decorative elements
+        with_background: Whether to draw subtle background
+
+    Returns:
+        float: Updated Y position
+    """
+    width, height = A4
+    header_height = 0.8*cm
+    content_width = width - MARGIN_LEFT - MARGIN_RIGHT
+
+    if with_background:
+        # Subtle background for section header
+        draw_rounded_rect(c, MARGIN_LEFT, y - header_height + 0.1*cm,
+                         content_width, header_height,
+                         radius=2*mm, fill_color=ANEYA_BG_SUBTLE)
+
+    # Left accent bar
+    draw_accent_bar(c, MARGIN_LEFT, y - header_height + 0.1*cm, 3*mm, header_height, accent_color)
+
+    # Section title
+    c.setFillColor(primary_color)
+    c.setFont("Helvetica-Bold", FONT_SECTION_HEADER)
+    c.drawString(MARGIN_LEFT + 0.6*cm, y - 0.45*cm, title)
+
+    y -= header_height + 0.4*cm
 
     return y
 
 
-def render_field(c: canvas.Canvas, label: str, value: Any, y: float, x_offset: float = 2*cm,
-                text_color=ANEYA_GRAY, primary_color=ANEYA_NAVY) -> float:
-    """Render a field with label and value"""
+def render_field(c: canvas.Canvas, label: str, value: Any, y: float, x_offset: float = None,
+                text_color=ANEYA_GRAY, primary_color=ANEYA_NAVY,
+                label_width: float = None, inline: bool = True) -> float:
+    """
+    Render a field with label and value using modern styling.
+
+    Features:
+    - Clean label/value separation
+    - Subtle visual distinction between label and value
+    - Support for inline and stacked layouts
+    - Intelligent word wrapping for long values
+
+    Args:
+        c: ReportLab canvas
+        label: Field label
+        value: Field value
+        y: Current Y position
+        x_offset: X offset for field (defaults to MARGIN_LEFT)
+        text_color: Color for value text
+        primary_color: Color for label text
+        label_width: Fixed label width (auto-calculated if None)
+        inline: If True, value appears next to label; if False, below
+
+    Returns:
+        float: Updated Y position
+    """
     if value is None or value == '' or value == []:
         return y
 
-    c.setFillColor(primary_color)
-    c.setFont("Helvetica-Bold", 10)
+    x_offset = x_offset if x_offset is not None else MARGIN_LEFT
+    width, height = A4
 
-    # Calculate label width to ensure enough spacing
-    label_text = f"{label}:"
-    label_width = c.stringWidth(label_text, "Helvetica-Bold", 10)
+    # Label styling - slightly lighter weight for modern feel
+    c.setFillColor(ANEYA_GRAY_MEDIUM)
+    c.setFont("Helvetica", FONT_LABEL)
+    label_text = f"{label}"
 
-    # Use dynamic spacing: label width + small gap (0.3cm ~ 1 space)
-    value_x_offset = x_offset + label_width + 0.3*cm
+    if label_width is None:
+        label_width = c.stringWidth(label_text, "Helvetica", FONT_LABEL)
 
     c.drawString(x_offset, y, label_text)
 
-    c.setFillColor(text_color)
-    c.setFont("Helvetica", 10)
+    # Value styling - slightly bolder for emphasis
+    c.setFillColor(primary_color)
+    c.setFont("Helvetica-Bold", FONT_VALUE)
 
     # Convert value to string
     value_str = str(value)
 
-    # Handle long text with word wrapping
-    if len(value_str) > 80:
-        # Split into multiple lines
-        max_width = 19*cm - value_x_offset
-        lines = []
-        words = value_str.split()
-        current_line = ""
+    if inline:
+        # Inline layout: value next to label
+        value_x = x_offset + label_width + 0.4*cm
+        max_value_width = width - MARGIN_RIGHT - value_x
 
-        for word in words:
-            test_line = f"{current_line} {word}".strip()
-            if c.stringWidth(test_line, "Helvetica", 10) <= max_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
+        # Handle long text with word wrapping
+        if c.stringWidth(value_str, "Helvetica-Bold", FONT_VALUE) > max_value_width:
+            lines = []
+            words = value_str.split()
+            current_line = ""
 
-        if current_line:
-            lines.append(current_line)
+            for word in words:
+                test_line = f"{current_line} {word}".strip()
+                if c.stringWidth(test_line, "Helvetica-Bold", FONT_VALUE) <= max_value_width:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
 
-        # Draw first line next to label
-        if lines:
-            c.drawString(value_x_offset, y, lines[0])
-            y -= 0.4*cm
+            if current_line:
+                lines.append(current_line)
 
-            # Draw remaining lines
-            for line in lines[1:]:
-                c.drawString(value_x_offset, y, line)
-                y -= 0.4*cm
+            # Draw first line next to label
+            if lines:
+                c.drawString(value_x, y, lines[0])
+                y -= FIELD_SPACING
+
+                # Draw remaining lines with indentation
+                for line in lines[1:]:
+                    c.drawString(value_x, y, line)
+                    y -= FIELD_SPACING
+        else:
+            c.drawString(value_x, y, value_str)
+            y -= FIELD_SPACING
     else:
-        c.drawString(value_x_offset, y, value_str)
-        y -= 0.4*cm
+        # Stacked layout: value below label
+        y -= 0.35*cm
+        c.drawString(x_offset + 0.2*cm, y, value_str)
+        y -= FIELD_SPACING
 
     return y
 
 
-def render_appointment_section(c: canvas.Canvas, appointment: Dict[str, Any], patient: Dict[str, Any], y: float) -> float:
-    """Render appointment details section"""
-    y = render_section_header(c, "Appointment Details", y)
+def render_field_card(c: canvas.Canvas, label: str, value: Any, y: float,
+                      x: float, card_width: float, card_height: float = 1.2*cm,
+                      primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL) -> float:
+    """
+    Render a field as a modern card with subtle border.
+    Great for key metrics like vital signs.
 
-    fields = [
-        ("Patient Name", patient.get('name')),
-        ("Date & Time", format_date_time(appointment.get('scheduled_time', ''))),
-        ("Duration", f"{appointment.get('duration_minutes', 'N/A')} minutes"),
-        ("Specialty", appointment.get('specialty', 'N/A')),
-        ("Status", appointment.get('status', '').title()),
+    Args:
+        c: ReportLab canvas
+        label: Field label
+        value: Field value
+        y: Current Y position (top of card)
+        x: X position for card
+        card_width: Width of the card
+        card_height: Height of the card
+        primary_color: Primary color
+        accent_color: Accent color for border
+
+    Returns:
+        float: Updated Y position
+    """
+    if value is None or value == '' or value == []:
+        return y
+
+    # Draw card background with subtle border
+    draw_rounded_rect(c, x, y - card_height, card_width, card_height,
+                     radius=2*mm, fill_color=ANEYA_WHITE,
+                     stroke_color=ANEYA_LIGHT_GRAY, stroke_width=0.3)
+
+    # Small accent at top of card
+    c.setFillColor(accent_color)
+    c.rect(x + 3*mm, y - 2*mm, card_width - 6*mm, 1.5*mm, fill=1, stroke=0)
+
+    # Label (smaller, above value)
+    c.setFillColor(ANEYA_GRAY_MEDIUM)
+    c.setFont("Helvetica", 7)
+    c.drawString(x + 0.3*cm, y - 0.55*cm, label)
+
+    # Value (larger, prominent)
+    c.setFillColor(primary_color)
+    c.setFont("Helvetica-Bold", 12)
+    value_str = str(value)
+    if len(value_str) > 15:
+        value_str = value_str[:12] + "..."
+    c.drawString(x + 0.3*cm, y - 0.95*cm, value_str)
+
+    return y
+
+
+def render_appointment_section(c: canvas.Canvas, appointment: Dict[str, Any], patient: Dict[str, Any], y: float,
+                               primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL) -> float:
+    """
+    Render appointment details section with modern card-based layout.
+    Key information displayed prominently in cards.
+    """
+    width, height = A4
+
+    y = render_section_header(c, "Appointment Details", y, primary_color=primary_color, accent_color=accent_color)
+
+    # Key metrics in cards (top row)
+    card_width = 4*cm
+    card_height = 1.3*cm
+    card_spacing = 0.4*cm
+    cards_start_x = MARGIN_LEFT
+
+    # Row of key metric cards
+    patient_name = patient.get('name', 'N/A')
+    date_time = format_date_time(appointment.get('scheduled_time', ''))
+    specialty = appointment.get('specialty', 'N/A')
+    status = appointment.get('status', '').title()
+
+    # Draw cards for key metrics
+    metrics = [
+        ("Patient", patient_name[:20] if len(patient_name) > 20 else patient_name),
+        ("Date & Time", date_time.split(' at ')[0] if ' at ' in date_time else date_time[:15]),
+        ("Specialty", specialty),
+        ("Status", status)
+    ]
+
+    for i, (label, value) in enumerate(metrics):
+        if value and value != 'N/A':
+            card_x = cards_start_x + i * (card_width + card_spacing)
+            render_field_card(c, label, value, y, card_x, card_width, card_height,
+                            primary_color=primary_color, accent_color=accent_color)
+
+    y -= card_height + 0.6*cm
+
+    # Additional details below cards
+    additional_fields = [
+        ("Duration", f"{appointment.get('duration_minutes', 'N/A')} minutes" if appointment.get('duration_minutes') else None),
         ("Reason for Visit", appointment.get('reason')),
         ("Notes", appointment.get('notes')),
     ]
 
-    for label, value in fields:
-        y = render_field(c, label, value, y)
+    for label, value in additional_fields:
+        if value:
+            y = render_field(c, label, value, y, primary_color=primary_color)
 
-    y -= 0.6*cm
+    y -= SECTION_SPACING
     return y
 
 
-def render_patient_section(c: canvas.Canvas, patient: Dict[str, Any], y: float) -> float:
-    """Render patient information section"""
-    y = render_section_header(c, "Patient Information", y)
+def render_patient_section(c: canvas.Canvas, patient: Dict[str, Any], y: float,
+                           primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL) -> float:
+    """
+    Render patient information section with modern styling.
+    Uses cards for physical measurements and clean layout for other info.
+    """
+    width, height = A4
+
+    y = render_section_header(c, "Patient Information", y, primary_color=primary_color, accent_color=accent_color)
 
     # Calculate age from date_of_birth if available
-    age_display = "Not recorded"
+    age_display = None
+    dob_display = None
     if patient.get('date_of_birth'):
         try:
-            # Handle various date formats
             dob_str = patient['date_of_birth']
-            # Remove timezone info and parse
             if 'T' in dob_str:
                 dob_str = dob_str.split('T')[0]
             dob = datetime.strptime(dob_str, '%Y-%m-%d')
             age = (datetime.now() - dob).days // 365
-            age_display = f"{age} years (DOB: {dob.strftime('%d %B %Y')})"
+            age_display = f"{age} yrs"
+            dob_display = dob.strftime('%d %b %Y')
         except Exception as e:
             print(f"⚠️  Error parsing date_of_birth: {e}")
-            # If parsing fails, just show the date if it looks reasonable
             dob_str = str(patient['date_of_birth'])
-            if len(dob_str) > 20:
-                age_display = "Not recorded"
-            else:
-                age_display = dob_str
+            if len(dob_str) <= 20:
+                dob_display = dob_str
     elif patient.get('age_years'):
-        age_display = f"{patient['age_years']} years"
+        age_display = f"{patient['age_years']} yrs"
 
-    # Get height and weight
-    height = patient.get('height_cm')
-    height_display = f"{height} cm" if height else "Not recorded"
+    # Get measurements
+    height_val = patient.get('height_cm')
+    weight_val = patient.get('weight_kg')
+    sex_val = patient.get('sex', '').title() if patient.get('sex') else None
 
-    weight = patient.get('weight_kg')
-    weight_display = f"{weight} kg" if weight else "Not recorded"
+    # Patient identifier cards row
+    card_width = 3.2*cm
+    card_height = 1.2*cm
+    card_spacing = 0.3*cm
 
-    fields = [
-        ("Patient Name", patient.get('name', 'Not recorded')),
-        ("Age", age_display),
-        ("Sex", patient.get('sex', 'Not specified')),
-        ("Height", height_display),
-        ("Weight", weight_display),
+    patient_cards = []
+    if age_display:
+        patient_cards.append(("Age", age_display))
+    if sex_val:
+        patient_cards.append(("Sex", sex_val))
+    if height_val:
+        patient_cards.append(("Height", f"{height_val} cm"))
+    if weight_val:
+        patient_cards.append(("Weight", f"{weight_val} kg"))
+
+    # Draw measurement cards if we have any
+    if patient_cards:
+        for i, (label, value) in enumerate(patient_cards[:5]):  # Max 5 cards
+            card_x = MARGIN_LEFT + i * (card_width + card_spacing)
+            render_field_card(c, label, value, y, card_x, card_width, card_height,
+                            primary_color=primary_color, accent_color=accent_color)
+        y -= card_height + 0.5*cm
+
+    # Text fields for other patient info
+    text_fields = [
+        ("Full Name", patient.get('name')),
+        ("Date of Birth", dob_display),
+    ]
+
+    for label, value in text_fields:
+        if value:
+            y = render_field(c, label, value, y, primary_color=primary_color)
+
+    # Medical history section (visually distinct)
+    y -= 0.3*cm
+
+    # Subtle subsection header
+    c.setFillColor(ANEYA_GRAY_MEDIUM)
+    c.setFont("Helvetica-Bold", FONT_SUBSECTION - 1)
+    c.drawString(MARGIN_LEFT, y, "Medical History")
+    y -= 0.5*cm
+
+    # Draw subtle line
+    draw_subtle_line(c, MARGIN_LEFT, y + 0.2*cm, MARGIN_LEFT + 4*cm, y + 0.2*cm, accent_color, 1)
+
+    medical_fields = [
         ("Allergies", patient.get('allergies') or "None recorded"),
         ("Current Medications", patient.get('current_medications') or "None recorded"),
         ("Current Conditions", patient.get('current_conditions') or "None recorded"),
     ]
 
-    for label, value in fields:
-        y = render_field(c, label, value, y)
+    for label, value in medical_fields:
+        y = render_field(c, label, value, y, primary_color=primary_color)
 
-    y -= 0.6*cm
+    y -= SECTION_SPACING
     return y
 
 
-def render_form_data_section(c: canvas.Canvas, form_data: Dict[str, Any], form_type: str, y: float) -> float:
-    """Render consultation form data based on form type"""
+def render_form_data_section(c: canvas.Canvas, form_data: Dict[str, Any], form_type: str, y: float,
+                             primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL) -> float:
+    """
+    Render consultation form data with modern styling.
+    Supports nested sections, lists, and various field types.
+    """
     width, height = A4
 
-    y = render_section_header(c, f"Consultation Form ({form_type.upper()})", y)
+    # Format form type for display
+    form_type_display = form_type.replace('_', ' ').title()
+    y = render_section_header(c, f"Clinical Notes — {form_type_display}", y,
+                             primary_color=primary_color, accent_color=accent_color)
 
     # Check if we need a new page
     if y < 5*cm:
         c.showPage()
-        y = height - 2*cm
-        y = render_section_header(c, f"Consultation Form ({form_type.upper()}) - Continued", y)
+        y = height - MARGIN_TOP
+        y = render_section_header(c, f"Clinical Notes — {form_type_display} (cont.)", y,
+                                 primary_color=primary_color, accent_color=accent_color)
 
     # Render nested JSONB data
     for section_key, section_value in form_data.items():
         # Check if need new page
         if y < 3*cm:
             c.showPage()
-            y = height - 2*cm
+            y = height - MARGIN_TOP
 
         if isinstance(section_value, dict):
             # Nested section (e.g., "vital_signs", "physical_exam")
-            c.setFillColor(ANEYA_TEAL)
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(2.5*cm, y, format_field_label(section_key))
-            y -= 0.5*cm
+            # Subsection header with accent styling
+            y -= 0.2*cm
+
+            # Small accent bar
+            draw_accent_bar(c, MARGIN_LEFT, y - 0.1*cm, 2*mm, 0.4*cm, accent_color)
+
+            c.setFillColor(primary_color)
+            c.setFont("Helvetica-Bold", FONT_SUBSECTION)
+            c.drawString(MARGIN_LEFT + 0.5*cm, y, format_field_label(section_key))
+            y -= 0.6*cm
 
             for field_key, field_value in section_value.items():
                 if field_value is not None and field_value != '' and field_value != []:
-                    y = render_field(c, format_field_label(field_key), field_value, y, x_offset=3*cm)
+                    y = render_field(c, format_field_label(field_key), field_value, y,
+                                   x_offset=MARGIN_LEFT + 0.3*cm, primary_color=primary_color)
 
                     # Check if need new page
                     if y < 3*cm:
                         c.showPage()
-                        y = height - 2*cm
+                        y = height - MARGIN_TOP
 
             y -= 0.4*cm
+
         elif isinstance(section_value, list):
             # List field (e.g., diagnoses)
             if section_value:  # Only render if not empty
-                c.setFillColor(ANEYA_TEAL)
-                c.setFont("Helvetica-Bold", 11)
-                c.drawString(2.5*cm, y, format_field_label(section_key))
-                y -= 0.4*cm
+                y -= 0.2*cm
+
+                # Small accent bar
+                draw_accent_bar(c, MARGIN_LEFT, y - 0.1*cm, 2*mm, 0.4*cm, accent_color)
+
+                c.setFillColor(primary_color)
+                c.setFont("Helvetica-Bold", FONT_SUBSECTION)
+                c.drawString(MARGIN_LEFT + 0.5*cm, y, format_field_label(section_key))
+                y -= 0.5*cm
 
                 for item in section_value:
                     if isinstance(item, dict):
                         # Render each dict item
                         for k, v in item.items():
                             if v:
-                                y = render_field(c, format_field_label(k), v, y, x_offset=3*cm)
+                                y = render_field(c, format_field_label(k), v, y,
+                                               x_offset=MARGIN_LEFT + 0.3*cm, primary_color=primary_color)
                     else:
-                        # Simple list item
+                        # Simple list item with bullet
+                        c.setFillColor(accent_color)
+                        c.circle(MARGIN_LEFT + 0.5*cm, y + 0.1*cm, 1.5*mm, fill=1, stroke=0)
                         c.setFillColor(ANEYA_GRAY)
-                        c.setFont("Helvetica", 10)
-                        c.drawString(3*cm, y, f"• {str(item)}")
-                        y -= 0.4*cm
+                        c.setFont("Helvetica", FONT_VALUE)
+                        c.drawString(MARGIN_LEFT + 0.9*cm, y, str(item))
+                        y -= FIELD_SPACING
 
                 y -= 0.4*cm
         else:
             # Top-level field
             if section_value is not None and section_value != '':
-                y = render_field(c, format_field_label(section_key), section_value, y, x_offset=2.5*cm)
+                y = render_field(c, format_field_label(section_key), section_value, y,
+                               x_offset=MARGIN_LEFT, primary_color=primary_color)
 
     return y
 
@@ -505,7 +940,13 @@ def generate_consultation_pdf(
     doctor_info: Optional[Dict[str, Any]] = None
 ) -> BytesIO:
     """
-    Generate a PDF consultation report.
+    Generate a beautiful, modern PDF consultation report.
+
+    Features:
+    - Modern gradient header with clinic branding
+    - Card-based layout for key metrics
+    - Clean typography with strong visual hierarchy
+    - Professional footer with page numbers
 
     Args:
         appointment: dict with appointment details
@@ -521,32 +962,41 @@ def generate_consultation_pdf(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Track Y position
-    y = height - 2*cm
+    # Track page number
+    page_num = 1
 
-    # Render sections
-    y = render_header(c, y, doctor_info)
+    # Track Y position - start from top
+    y = height - MARGIN_TOP
+
+    # Render modern header with gradient decoration
+    y = render_header(c, y, doctor_info, title="Consultation Report")
+
+    # Render appointment section with card-based metrics
     y = render_appointment_section(c, appointment, patient, y)
 
     # Check if need new page before patient section
     if y < 8*cm:
+        draw_page_footer(c, page_num)
         c.showPage()
-        y = height - 2*cm
+        page_num += 1
+        # New page header decoration
+        y = draw_header_decoration(c, width, height, ANEYA_NAVY, ANEYA_TEAL)
 
+    # Render patient section with modern cards for vitals
     y = render_patient_section(c, patient, y)
 
     # Check if need new page before form data
     if y < 8*cm:
+        draw_page_footer(c, page_num)
         c.showPage()
-        y = height - 2*cm
+        page_num += 1
+        y = draw_header_decoration(c, width, height, ANEYA_NAVY, ANEYA_TEAL)
 
+    # Render form data section
     y = render_form_data_section(c, form_data, form_type, y)
 
-    # Add footer on last page
-    c.setFillColor(ANEYA_LIGHT_GRAY)
-    c.setFont("Helvetica", 8)
-    c.drawCentredString(width/2, 1.5*cm, "Aneya Healthcare Platform")
-    c.drawCentredString(width/2, 1*cm, "This document is confidential and for medical professionals only")
+    # Add modern footer on last page
+    draw_page_footer(c, page_num, primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL)
 
     c.save()
     buffer.seek(0)
@@ -668,34 +1118,40 @@ def render_table_field(
                 y = height - 2*cm
             available_width = portrait_available
 
-    # Table title (skip if splitting, as each chunk will have its own title)
+    # Table title with modern styling (skip if splitting, as each chunk will have its own title)
     if not needs_split:
-        c.setFont("Helvetica-Bold", 10)
+        left_margin = 1*cm if needs_landscape else MARGIN_LEFT
+
+        # Accent bar before title
+        draw_accent_bar(c, left_margin, y - 0.1*cm, 2*mm, 0.4*cm, ANEYA_TEAL)
+
+        c.setFont("Helvetica-Bold", FONT_SUBSECTION)
         c.setFillColor(primary_color)
-        left_margin = 1*cm if needs_landscape else 2*cm
-        c.drawString(left_margin, y, f"• {label}")
-        y -= 0.6*cm
+        c.drawString(left_margin + 0.5*cm, y, label)
+        y -= 0.7*cm
 
     # Get table data from form_data
     table_data_raw = form_data.get(section_id, {}).get(field_name, [])
     if not isinstance(table_data_raw, list):
         table_data_raw = []
 
-    # Create paragraph styles for wrapping
+    # Create paragraph styles for wrapping with modern typography
     header_style = ParagraphStyle(
         'TableHeader',
         fontName='Helvetica-Bold',
-        fontSize=7,
-        leading=8,
-        alignment=1  # Center
+        fontSize=FONT_TABLE_HEADER,
+        leading=10,
+        alignment=1,  # Center
+        textColor=ANEYA_WHITE
     )
 
     cell_style = ParagraphStyle(
         'TableCell',
         fontName='Helvetica',
-        fontSize=7,
-        leading=8,
-        alignment=0  # Left
+        fontSize=FONT_TABLE_CELL,
+        leading=10,
+        alignment=0,  # Left
+        textColor=ANEYA_GRAY
     )
 
     # Build table data for PDF
@@ -855,20 +1311,31 @@ def render_table_field(
 
             pdf_table = Table(chunk_table_data, colWidths=chunk_widths, rowHeights=row_heights)
 
+            # Modern table styling with dark header
             table_style = [
-                ('BACKGROUND', (0, 0), (-1, 0), light_gray_color),
-                ('TEXTCOLOR', (0, 0), (-1, 0), primary_color),
+                # Header styling - dark background with white text
+                ('BACKGROUND', (0, 0), (-1, 0), primary_color),
+                ('TEXTCOLOR', (0, 0), (-1, 0), ANEYA_WHITE),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 7),
+                ('FONTSIZE', (0, 0), (-1, 0), FONT_TABLE_HEADER),
                 ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                # Data row styling
                 ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, ANEYA_CREAM]),
-                ('LEFTPADDING', (0, 0), (-1, -1), 3),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-                ('TOPPADDING', (0, 0), (-1, -1), 3),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('TEXTCOLOR', (0, 1), (-1, -1), ANEYA_GRAY),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), FONT_TABLE_CELL),
+                # Subtle borders - only horizontal lines for modern look
+                ('LINEBELOW', (0, 0), (-1, 0), 1, primary_color),
+                ('LINEBELOW', (0, 1), (-1, -2), 0.3, ANEYA_LIGHT_GRAY),
+                ('LINEBELOW', (0, -1), (-1, -1), 0.5, ANEYA_LIGHT_GRAY),
+                # Alternating row backgrounds
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [ANEYA_WHITE, ANEYA_CREAM]),
+                # Generous padding for readability
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
             ]
             pdf_table.setStyle(TableStyle(table_style))
 
@@ -899,31 +1366,42 @@ def render_table_field(
 
     pdf_table = Table(table_data, colWidths=col_widths, rowHeights=row_heights)
 
-    # Base table style
+    # Modern table styling with elegant dark header
     table_style = [
-        ('BACKGROUND', (0, 0), (-1, 0), light_gray_color),
-        ('TEXTCOLOR', (0, 0), (-1, 0), primary_color),
+        # Header styling - dark background with white text
+        ('BACKGROUND', (0, 0), (-1, 0), primary_color),
+        ('TEXTCOLOR', (0, 0), (-1, 0), ANEYA_WHITE),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 7),
+        ('FONTSIZE', (0, 0), (-1, 0), FONT_TABLE_HEADER),
         ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+        # Data row styling
         ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, ANEYA_CREAM]),
-        ('LEFTPADDING', (0, 0), (-1, -1), 3),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-        ('TOPPADDING', (0, 0), (-1, -1), 3),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('TEXTCOLOR', (0, 1), (-1, -1), ANEYA_GRAY),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), FONT_TABLE_CELL),
+        # Subtle borders - modern horizontal line style
+        ('LINEBELOW', (0, 0), (-1, 0), 1, primary_color),
+        ('LINEBELOW', (0, 1), (-1, -2), 0.3, ANEYA_LIGHT_GRAY),
+        ('LINEBELOW', (0, -1), (-1, -1), 0.5, ANEYA_LIGHT_GRAY),
+        # Alternating row backgrounds for readability
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [ANEYA_WHITE, ANEYA_CREAM]),
+        # Generous padding for modern feel
+        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+        ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
     ]
 
     # Additional styling for transposed tables with row headers
     if is_transposed and row_names:
         table_style.extend([
-            ('BACKGROUND', (0, 1), (0, -1), light_gray_color),  # Row header column background
-            ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),  # Row header column bold
-            ('FONTSIZE', (0, 1), (0, -1), 7),
-            ('ALIGN', (0, 1), (0, -1), 'LEFT'),  # Row headers left-aligned
-            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),  # Data cells centered
+            ('BACKGROUND', (0, 1), (0, -1), ANEYA_BG_SUBTLE),  # Row header column - subtle background
+            ('TEXTCOLOR', (0, 1), (0, -1), primary_color),     # Row header text color
+            ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),   # Row header column bold
+            ('FONTSIZE', (0, 1), (0, -1), FONT_TABLE_CELL),
+            ('ALIGN', (0, 1), (0, -1), 'LEFT'),                # Row headers left-aligned
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),             # Data cells centered
         ])
 
     pdf_table.setStyle(TableStyle(table_style))
@@ -1167,14 +1645,20 @@ def generate_custom_form_pdf(
     patient: Optional[Dict[str, Any]] = None,
     doctor_info: Optional[Dict[str, Any]] = None,
     form_schema: Optional[Dict[str, Any]] = None,
-    # NEW: Color customization
+    # Color customization
     primary_color: Optional[str] = None,
     accent_color: Optional[str] = None,
     text_color: Optional[str] = None,
     light_gray_color: Optional[str] = None
 ) -> BytesIO:
     """
-    Generate a PDF for a custom form using stored pdf_template.
+    Generate a beautiful, modern PDF for a custom form using stored pdf_template.
+
+    Features:
+    - Modern gradient header with clinic branding
+    - Card-based layout for patient metrics
+    - Clean typography with strong visual hierarchy
+    - Professional footer with page numbers
 
     Args:
         form_data: Filled form data (JSONB from filled_forms table)
@@ -1202,43 +1686,64 @@ def generate_custom_form_pdf(
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    # Track Y position
-    y = height - 2*cm
+    # Track page number
+    page_num = 1
+
+    # Track Y position - start from top
+    y = height - MARGIN_TOP
 
     # Get page config
     page_config = pdf_template.get('page_config', {})
     header_config = page_config.get('header', {})
 
-    # Render header
-    if header_config.get('show_logo') or header_config.get('show_clinic_name'):
-        y = render_header(c, y, doctor_info, primary_color=primary_hex, text_color=text_hex)
-    else:
-        # Simple header with form title
-        c.setFillColor(primary_hex)
-        c.setFont("Helvetica-Bold", 20)
-        form_title = header_config.get('title', format_field_label(form_name))
-        c.drawCentredString(width/2, y, form_title)
-        y -= 0.5*cm
+    # Format form title
+    form_title = header_config.get('title', format_field_label(form_name))
 
-        # Specialty subtitle
-        c.setFillColor(text_hex)
-        c.setFont("Helvetica", 12)
-        c.drawCentredString(width/2, y, f"Specialty: {specialty.title()}")
-        y -= 0.5*cm
+    # Render modern header with gradient decoration
+    if header_config.get('show_logo') or header_config.get('show_clinic_name'):
+        y = render_header(c, y, doctor_info, primary_color=primary_hex, text_color=text_hex,
+                         accent_color=accent_hex, title=form_title)
+    else:
+        # Draw decorative header bar at top of page
+        y = draw_header_decoration(c, width, height, primary_hex, accent_hex)
+
+        # Form title with elegant typography
+        c.setFillColor(primary_hex)
+        c.setFont("Helvetica-Bold", FONT_TITLE)
+        c.drawString(MARGIN_LEFT, y, form_title)
+        y -= 0.7*cm
+
+        # Specialty subtitle with badge-like styling
+        c.setFillColor(ANEYA_GRAY_MEDIUM)
+        c.setFont("Helvetica", FONT_SUBTITLE - 2)
+        specialty_text = f"{specialty.title()}"
+        c.drawString(MARGIN_LEFT, y, specialty_text)
 
         # Generation date
-        c.setFont("Helvetica", 10)
         generation_date = datetime.now().strftime('%d %B %Y at %H:%M')
-        c.drawCentredString(width/2, y, f"Generated: {generation_date}")
-        y -= 1.5*cm
+        date_x = MARGIN_LEFT + c.stringWidth(specialty_text, "Helvetica", FONT_SUBTITLE - 2) + 1*cm
+        c.drawString(date_x, y, f"•  {generation_date}")
+
+        # Decorative dots
+        dots_x = date_x + c.stringWidth(f"•  {generation_date}", "Helvetica", FONT_SUBTITLE - 2) + 0.5*cm
+        draw_decorative_dots(c, dots_x, y + 0.15*cm, count=3, spacing=3*mm, radius=0.8*mm, color=accent_hex)
+
+        y -= 1.2*cm
+
+        # Subtle separator
+        draw_subtle_line(c, MARGIN_LEFT, y + 0.3*cm, width - MARGIN_RIGHT, y + 0.3*cm,
+                        ANEYA_LIGHT_GRAY, 0.5)
+        y -= 0.4*cm
 
     # Render patient section if provided
     if patient:
         if y < 8*cm:
+            draw_page_footer(c, page_num, primary_color=primary_hex, accent_color=accent_hex)
             c.showPage()
-            y = height - 2*cm
+            page_num += 1
+            y = draw_header_decoration(c, width, height, primary_hex, accent_hex)
 
-        y = render_patient_section(c, patient, y)
+        y = render_patient_section(c, patient, y, primary_color=primary_hex, accent_color=accent_hex)
 
     # Render form sections using template
     sections = pdf_template.get('sections', [])
@@ -1246,26 +1751,25 @@ def generate_custom_form_pdf(
     for section_config in sections:
         # Check for page break before section
         if section_config.get('page_break_before', False):
+            draw_page_footer(c, page_num, primary_color=primary_hex, accent_color=accent_hex)
             c.showPage()
-            y = height - 2*cm
+            page_num += 1
+            y = draw_header_decoration(c, width, height, primary_hex, accent_hex)
 
         # Check if need new page
         if y < 8*cm:
+            draw_page_footer(c, page_num, primary_color=primary_hex, accent_color=accent_hex)
             c.showPage()
-            y = height - 2*cm
+            page_num += 1
+            y = draw_header_decoration(c, width, height, primary_hex, accent_hex)
 
         # Render section
         y = render_custom_form_section(c, section_config, form_data, y, form_schema,
                                       primary_color=primary_hex, accent_color=accent_hex,
                                       text_color=text_hex, light_gray_color=light_gray_hex)
 
-    # Add footer if configured
-    footer_config = page_config.get('footer', {})
-    if footer_config.get('show_page_numbers') or footer_config.get('show_timestamp'):
-        c.setFillColor(light_gray_hex)
-        c.setFont("Helvetica", 8)
-        c.drawCentredString(width/2, 1.5*cm, "Aneya Healthcare Platform")
-        c.drawCentredString(width/2, 1*cm, "This document is confidential and for medical professionals only")
+    # Add modern footer on last page
+    draw_page_footer(c, page_num, primary_color=primary_hex, accent_color=accent_hex)
 
     c.save()
     buffer.seek(0)
