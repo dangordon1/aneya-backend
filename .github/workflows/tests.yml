@@ -34,3 +34,4 @@ jobs:
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           GCS_BUCKET_NAME: ${{ secrets.GCS_BUCKET_NAME }}
+          SCRAPEOPS_API_KEY: ${{ secrets.SCRAPEOPS_API_KEY }}

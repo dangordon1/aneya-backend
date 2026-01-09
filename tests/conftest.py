@@ -7,6 +7,8 @@ This module provides:
 - Mock fixtures for all external services
 - Multi-language test data fixtures
 - Clinical scenario fixtures
+
+CI/CD: Tests run automatically on PRs to main via GitHub Actions.
 """
 
 import os
