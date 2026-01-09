@@ -4248,12 +4248,56 @@ async def determine_consultation_type(request: DetermineConsultationTypeRequest)
     This helps auto-select the correct consultation form based on the conversation content,
     especially for specialists who handle multiple types of consultations (e.g., OBGyn doctors
     seeing general gynecology, infertility, or antenatal patients).
+
+    Now fetches available form types dynamically from the database.
     """
     try:
         import time
         start_time = time.time()
 
         print(f"🔍 Determining consultation type for {request.doctor_specialty} doctor")
+
+        # Fetch available forms from database based on doctor specialty
+        specialty_mapping = {
+            'obgyn': 'obstetrics_gynecology',
+            'cardiology': 'cardiology',
+            'general': None  # All forms
+        }
+        db_specialty = specialty_mapping.get(request.doctor_specialty, request.doctor_specialty)
+
+        # Query forms from database
+        if db_specialty:
+            forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').eq('specialty', db_specialty).execute()
+        else:
+            forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
+
+        available_forms = forms_response.data if forms_response.data else []
+
+        if not available_forms:
+            print(f"⚠️  No forms found for specialty {db_specialty}, fetching all active forms")
+            forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
+            available_forms = forms_response.data if forms_response.data else []
+
+        print(f"📋 Found {len(available_forms)} available forms: {[f['form_name'] for f in available_forms]}")
+
+        # If only one form available, return it directly
+        if len(available_forms) == 1:
+            form = available_forms[0]
+            print(f"✅ Only one form available, auto-selecting: {form['form_name']}")
+            return DetermineConsultationTypeResponse(
+                consultation_type=form['form_name'],
+                confidence=1.0,
+                reasoning=f"Only one form available for this specialty: {form['form_name']}"
+            )
+
+        # If no forms available, return error
+        if not available_forms:
+            print(f"❌ No forms available for specialty {request.doctor_specialty}")
+            return DetermineConsultationTypeResponse(
+                consultation_type='unknown',
+                confidence=0.0,
+                reasoning="No forms configured for this specialty"
+            )
 
         # Build conversation text
         conversation_lines = []
@@ -4265,42 +4309,44 @@ async def determine_consultation_type(request: DetermineConsultationTypeRequest)
 
         conversation_text = "\n".join(conversation_lines)
 
-        # Build prompt for Claude
-        system_prompt = """You are a medical consultation classifier for OB/GYN doctors. Analyze the conversation and determine which type of OB/GYN consultation this is.
+        # Build dynamic form options for the prompt
+        form_options = []
+        form_names = []
+        for i, form in enumerate(available_forms, 1):
+            form_name = form['form_name']
+            description = form.get('description') or f"Form for {form_name} consultations"
+            form_options.append(f"{i}. **{form_name}**: {description}")
+            form_names.append(form_name)
 
-You MUST classify as ONE of these three types ONLY:
+        form_options_text = "\n\n".join(form_options)
+        valid_types = ", ".join(form_names)
 
-1. **antenatal**: Pregnancy-related care
-   - Indicators: "pregnant", "weeks pregnant", "fetal", "prenatal", "pregnancy test positive", "ultrasound", "antenatal", "baby", "delivery", "due date", "trimester", "expecting"
-   - Examples: prenatal visits, pregnancy complications, fetal monitoring, obstetric care
+        # Build prompt for Claude with dynamic form options
+        system_prompt = f"""You are a medical consultation classifier. Analyze the conversation and determine which type of consultation form should be used.
 
-2. **infertility**: Fertility issues and reproductive challenges
-   - Indicators: "trying to conceive", "can't get pregnant", "difficulty conceiving", "fertility", "IVF", "IUI", "ovulation", "infertility treatment", "not conceiving", "assisted reproduction", "trying for baby"
-   - Examples: difficulty getting pregnant, fertility workup, assisted reproductive technology
+You MUST classify as ONE of these form types ONLY:
 
-3. **obgyn**: General gynecology (DEFAULT if not clearly antenatal or infertility)
-   - Indicators: "irregular periods", "contraception", "menstrual", "pap smear", "pelvic exam", "gynecological", "bleeding", "discharge", "pain", "fibroids", "PCOS", "birth control"
-   - Examples: menstrual issues, contraception counseling, gynecological exams, routine screening
+{form_options_text}
 
 CLASSIFICATION RULES:
-- If conversation mentions CURRENT PREGNANCY → MUST be "antenatal"
-- If about TRYING TO GET PREGNANT or fertility problems → "infertility"
-- If general gynecological issues or uncertain → "obgyn" (default)
-- NEVER return any value other than: antenatal, infertility, or obgyn
+- Carefully read the conversation and match it to the most appropriate form based on the descriptions above
+- Consider key medical terms, symptoms, and the nature of the consultation
+- If uncertain between multiple options, choose the most specific match
+- You MUST return one of these exact form names: {valid_types}
 
 Return JSON:
-{
-  "consultation_type": "antenatal|infertility|obgyn",
+{{
+  "consultation_type": "<one of: {valid_types}>",
   "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of classification based on conversation keywords"
-}"""
+  "reasoning": "Brief explanation of classification based on conversation content"
+}}"""
 
         user_prompt = f"""Doctor Specialty: {request.doctor_specialty}
 
 Conversation:
 {conversation_text}
 
-Classify this consultation:"""
+Classify this consultation into one of: {valid_types}"""
 
         # Create local Anthropic client for Claude API calls
         import anthropic
@@ -4328,22 +4374,35 @@ Classify this consultation:"""
         except json.JSONDecodeError as e:
             print(f"⚠️  Failed to parse Claude response: {e}")
             print(f"Response: {response_text}")
-            # Fallback to default obgyn for OBGyn doctors
+            # Fallback to first available form
+            default_form = form_names[0] if form_names else 'unknown'
             return DetermineConsultationTypeResponse(
-                consultation_type='obgyn',
+                consultation_type=default_form,
                 confidence=0.5,
-                reasoning="Failed to parse AI response, defaulting to general obgyn consultation"
+                reasoning=f"Failed to parse AI response, defaulting to {default_form}"
             )
 
-        consultation_type = result.get('consultation_type', 'obgyn')
+        consultation_type = result.get('consultation_type', form_names[0] if form_names else 'unknown')
         confidence = result.get('confidence', 0.0)
         reasoning = result.get('reasoning', '')
 
-        # Validate that the type is one of the allowed three
-        if consultation_type not in ['antenatal', 'infertility', 'obgyn']:
-            print(f"⚠️  Invalid consultation type '{consultation_type}', defaulting to 'obgyn'")
-            consultation_type = 'obgyn'
-            confidence = max(0.3, confidence * 0.5)  # Reduce confidence for invalid response
+        # Validate that the type is one of the available forms
+        if consultation_type not in form_names:
+            print(f"⚠️  Invalid consultation type '{consultation_type}', not in available forms: {form_names}")
+            # Try to find a close match
+            consultation_type_lower = consultation_type.lower()
+            matched = False
+            for form_name in form_names:
+                if form_name.lower() in consultation_type_lower or consultation_type_lower in form_name.lower():
+                    print(f"   Found partial match: {consultation_type} → {form_name}")
+                    consultation_type = form_name
+                    matched = True
+                    break
+
+            if not matched:
+                consultation_type = form_names[0]
+                confidence = max(0.3, confidence * 0.5)  # Reduce confidence for invalid response
+                print(f"   No match found, defaulting to: {consultation_type}")
 
         processing_time = int((time.time() - start_time) * 1000)
         print(f"✅ Consultation type: {consultation_type} (confidence: {confidence:.2f}) in {processing_time}ms")
@@ -4359,11 +4418,11 @@ Classify this consultation:"""
         print(f"❌ Error determining consultation type: {str(e)}")
         import traceback
         traceback.print_exc()
-        # Fallback to default obgyn consultation type
+        # Fallback to first available form or 'unknown'
         return DetermineConsultationTypeResponse(
-            consultation_type='obgyn',
+            consultation_type='unknown',
             confidence=0.3,
-            reasoning=f"Error occurred, defaulting to general obgyn consultation: {str(e)}"
+            reasoning=f"Error occurred during classification: {str(e)}"
         )
 
 
@@ -4384,11 +4443,15 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
 
         print(f"📋 Extracting fields for {request.form_type} form (chunk #{request.chunk_index})")
 
-        # Validate form type
-        if request.form_type not in ['obgyn', 'infertility', 'antenatal']:
+        # Validate form type against database - check if form exists
+        form_check = supabase.table('custom_forms').select('form_name').eq('form_name', request.form_type).eq('status', 'active').execute()
+        if not form_check.data:
+            # Get list of valid forms for error message
+            valid_forms = supabase.table('custom_forms').select('form_name').eq('status', 'active').execute()
+            valid_names = [f['form_name'] for f in (valid_forms.data or [])]
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid form type: {request.form_type}. Expected one of: obgyn, infertility, antenatal"
+                detail=f"Invalid form type: {request.form_type}. Expected one of: {', '.join(valid_names)}"
             )
 
         # Process ALL segments (both doctor and patient)
