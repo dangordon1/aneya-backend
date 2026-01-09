@@ -4,7 +4,7 @@ Integration tests for external services.
 These tests hit real APIs and verify connectivity and API key validity.
 Run with: pytest tests/integration/ -v -m integration
 
-Note: These tests consume API credits. Run sparingly.
+Note: Some tests consume API credits. The Sarvam-M chat test is FREE.
 """
 
 import os
@@ -25,9 +25,34 @@ class TestSarvamAPI:
             pytest.skip("SARVAM_API_KEY not set")
         return key
 
-    def test_sarvam_api_key_valid(self, sarvam_api_key):
-        """Test that the Sarvam API key is valid using transliteration endpoint."""
-        # Use the transliterate endpoint - it's lightweight and cheap
+    def test_sarvam_api_key_valid_free(self, sarvam_api_key):
+        """Test API key validity using FREE Sarvam-M chat endpoint (₹0/token).
+
+        This test consumes NO credits - ideal for CI/CD pipelines.
+        """
+        response = httpx.post(
+            "https://api.sarvam.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {sarvam_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "sarvam-m",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 5
+            },
+            timeout=30.0
+        )
+
+        if response.status_code == 401:
+            pytest.fail(f"Invalid Sarvam API key: {response.text}")
+
+        assert response.status_code == 200, f"API error {response.status_code}: {response.text}"
+        data = response.json()
+        print(f"✅ Sarvam API key valid - Sarvam-M responded (FREE, no credits used)")
+
+    def test_sarvam_transliteration(self, sarvam_api_key):
+        """Test transliteration endpoint (consumes credits: ₹20/10K chars)."""
         response = httpx.post(
             "https://api.sarvam.ai/transliterate",
             headers={
@@ -42,11 +67,10 @@ class TestSarvamAPI:
             timeout=30.0
         )
 
-        # Check response
         assert response.status_code == 200, f"API returned {response.status_code}: {response.text}"
         data = response.json()
         assert "transliterated_text" in data or "output" in data, f"Unexpected response: {data}"
-        print(f"Sarvam API working - transliterated 'namaste' to: {data}")
+        print(f"Sarvam transliteration: 'namaste' -> {data.get('transliterated_text', data)}")
 
     def test_sarvam_hindi_transliteration(self, sarvam_api_key):
         """Test Sarvam transliteration from Devanagari to Roman."""
