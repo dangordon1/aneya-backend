@@ -4283,17 +4283,11 @@ async def determine_consultation_type(request: DetermineConsultationTypeRequest)
                 forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
                 available_forms = forms_response.data if forms_response.data else []
         except Exception as db_error:
-            print(f"⚠️  Could not fetch forms from database: {db_error}")
-            # Fallback to hardcoded forms for testing/CI environments
-            if request.doctor_specialty == 'obgyn':
-                available_forms = [
-                    {'form_name': 'antenatal', 'description': 'Antenatal and pregnancy care'},
-                    {'form_name': 'fertility', 'description': 'Fertility and infertility consultations'},
-                    {'form_name': 'obgyn', 'description': 'General gynecology consultations'}
-                ]
-            else:
-                available_forms = [{'form_name': 'general', 'description': 'General consultation'}]
-            print(f"📋 Using fallback forms: {[f['form_name'] for f in available_forms]}")
+            print(f"❌ Could not fetch forms from database: {db_error}")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Database unavailable: {str(db_error)}"
+            )
 
         print(f"📋 Found {len(available_forms)} available forms: {[f['form_name'] for f in available_forms]}")
 

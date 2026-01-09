@@ -326,9 +326,54 @@ def mock_supabase():
         mock_result = MagicMock()
         mock_result.data = [{"id": "test-id", "status": "completed"}]
 
+        # Support both .from_() and .table() patterns
         mock_client.from_.return_value.select.return_value.execute.return_value = mock_result
         mock_client.from_.return_value.insert.return_value.execute.return_value = mock_result
         mock_client.from_.return_value.update.return_value.execute.return_value = mock_result
+
+        # Support chained .eq() calls for table queries
+        mock_table = MagicMock()
+        mock_select = MagicMock()
+        mock_eq = MagicMock()
+
+        mock_eq.eq.return_value = mock_eq
+        mock_eq.execute.return_value = mock_result
+
+        mock_select.eq.return_value = mock_eq
+        mock_table.select.return_value = mock_select
+        mock_client.table.return_value = mock_table
+
+        mock_get_client.return_value = mock_client
+
+        yield mock_client
+
+
+@pytest.fixture
+def mock_supabase_with_forms():
+    """Mock Supabase client with OBGyn forms for consultation type tests."""
+    with patch('api.get_supabase_client') as mock_get_client:
+        mock_client = MagicMock()
+
+        # Mock forms result for custom_forms table
+        forms_result = MagicMock()
+        forms_result.data = [
+            {'form_name': 'antenatal', 'description': 'Antenatal and pregnancy care'},
+            {'form_name': 'fertility', 'description': 'Fertility and infertility consultations'},
+            {'form_name': 'obgyn', 'description': 'General gynecology consultations'}
+        ]
+
+        # Support chained .eq() calls
+        mock_eq = MagicMock()
+        mock_eq.eq.return_value = mock_eq
+        mock_eq.execute.return_value = forms_result
+
+        mock_select = MagicMock()
+        mock_select.eq.return_value = mock_eq
+
+        mock_table = MagicMock()
+        mock_table.select.return_value = mock_select
+
+        mock_client.table.return_value = mock_table
 
         mock_get_client.return_value = mock_client
 

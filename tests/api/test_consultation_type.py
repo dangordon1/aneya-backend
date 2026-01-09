@@ -17,7 +17,7 @@ from tests.fixtures.clinical_scenarios import CONSULTATION_TYPE_SCENARIOS
 class TestConsultationTypeClassification:
     """Test automatic consultation type determination."""
 
-    def test_antenatal_classification(self, test_client, mock_anthropic_consultation_type):
+    def test_antenatal_classification(self, test_client, mock_anthropic_consultation_type, mock_supabase_with_forms):
         """Test classification of pregnancy consultation."""
         segments = [
             {"speaker_id": "speaker_0", "speaker_role": "Doctor", "text": "How many weeks pregnant are you?", "start_time": 0.0},
@@ -35,7 +35,7 @@ class TestConsultationTypeClassification:
         assert "consultation_type" in data
         assert data["consultation_type"] in ["antenatal", "obgyn"]
 
-    def test_infertility_classification(self, test_client, mock_anthropic):
+    def test_infertility_classification(self, test_client, mock_anthropic, mock_supabase_with_forms):
         """Test classification of infertility consultation."""
         segments = [
             {"speaker_id": "speaker_0", "speaker_role": "Doctor", "text": "How long have you been trying to conceive?", "start_time": 0.0},
@@ -44,7 +44,7 @@ class TestConsultationTypeClassification:
 
         # Configure mock for infertility classification
         mock_anthropic.messages.create.return_value.content = [MagicMock(text=json.dumps({
-            "consultation_type": "infertility",
+            "consultation_type": "fertility",
             "confidence": 0.92,
             "reasoning": "Patient mentions trying to conceive for extended period"
         }))]
@@ -59,7 +59,7 @@ class TestConsultationTypeClassification:
         data = response.json()
         assert "consultation_type" in data
 
-    def test_obgyn_default_classification(self, test_client, mock_anthropic):
+    def test_obgyn_default_classification(self, test_client, mock_anthropic, mock_supabase_with_forms):
         """Test fallback to general OBGYN for unclear consultations."""
         segments = [
             {"speaker_id": "speaker_0", "speaker_role": "Doctor", "text": "What brings you in today?", "start_time": 0.0},
@@ -84,7 +84,7 @@ class TestConsultationTypeClassification:
         assert "consultation_type" in data
         assert data["consultation_type"] == "obgyn"
 
-    def test_empty_segments(self, test_client):
+    def test_empty_segments(self, test_client, mock_supabase_with_forms):
         """Test handling of empty segments."""
         response = test_client.post("/api/determine-consultation-type", json={
             "diarized_segments": [],
@@ -95,7 +95,7 @@ class TestConsultationTypeClassification:
         # Should handle gracefully
         assert response.status_code in [200, 400, 422]
 
-    def test_missing_required_fields(self, test_client):
+    def test_missing_required_fields(self, test_client, mock_supabase_with_forms):
         """Test validation when required fields are missing."""
         response = test_client.post("/api/determine-consultation-type", json={
             "diarized_segments": []
@@ -108,7 +108,7 @@ class TestConsultationTypeClassification:
 class TestConsultationTypeMultilingual:
     """Test consultation type classification with multiple languages."""
 
-    def test_hindi_pregnancy_classification(self, test_client, mock_anthropic):
+    def test_hindi_pregnancy_classification(self, test_client, mock_anthropic, mock_supabase_with_forms):
         """Test classification of Hindi pregnancy consultation."""
         segments = [
             {"speaker_id": "speaker_0", "speaker_role": "Doctor", "text": "Aap kitne hafte ki pregnant hain?", "start_time": 0.0},
@@ -131,7 +131,7 @@ class TestConsultationTypeMultilingual:
         data = response.json()
         assert "consultation_type" in data
 
-    def test_mixed_language_classification(self, test_client, mock_anthropic_consultation_type):
+    def test_mixed_language_classification(self, test_client, mock_anthropic_consultation_type, mock_supabase_with_forms):
         """Test classification with mixed Hindi-English consultation."""
         segments = [
             {"speaker_id": "speaker_0", "speaker_role": "Doctor", "text": "What brings you in today?", "start_time": 0.0},
@@ -150,7 +150,7 @@ class TestConsultationTypeMultilingual:
 class TestConsultationTypeEdgeCases:
     """Test edge cases for consultation type classification."""
 
-    def test_invalid_form_type_fallback(self, test_client, mock_anthropic):
+    def test_invalid_form_type_fallback(self, test_client, mock_anthropic, mock_supabase_with_forms):
         """Test that invalid form types fall back to obgyn."""
         segments = [
             {"speaker_id": "speaker_0", "text": "Hello", "start_time": 0.0},
@@ -174,9 +174,9 @@ class TestConsultationTypeEdgeCases:
         data = response.json()
         # Should fall back to valid type
         if data.get("success"):
-            assert data["consultation_type"] in ["antenatal", "infertility", "obgyn"]
+            assert data["consultation_type"] in ["antenatal", "fertility", "obgyn"]
 
-    def test_llm_error_handling(self, test_client, mock_anthropic):
+    def test_llm_error_handling(self, test_client, mock_anthropic, mock_supabase_with_forms):
         """Test handling when LLM returns malformed response."""
         segments = [
             {"speaker_id": "speaker_0", "text": "Test", "start_time": 0.0},
