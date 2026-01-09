@@ -4255,6 +4255,9 @@ async def determine_consultation_type(request: DetermineConsultationTypeRequest)
         import time
         start_time = time.time()
 
+        # Initialize Supabase client
+        supabase = get_supabase_client()
+
         print(f"🔍 Determining consultation type for {request.doctor_specialty} doctor")
 
         # Fetch available forms from database based on doctor specialty
@@ -4749,6 +4752,17 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 
         print(f"📊 Detected: {consultation_type} (confidence: {confidence:.2f})")
 
+        # Step 2b: Immediately save detected_consultation_type to consultation record
+        # This ensures the type is saved even if form creation fails
+        try:
+            supabase.table('consultations').update({
+                'detected_consultation_type': consultation_type
+            }).eq('id', request.consultation_id).execute()
+            print(f"✅ Saved detected_consultation_type: {consultation_type}")
+        except Exception as e:
+            print(f"⚠️ Failed to save detected_consultation_type: {e}")
+            # Continue - don't fail the whole request
+
         # Step 3: Check if form exists in unified consultation_forms table
         # ✨ NEW: Using unified table with JSONB storage
         existing_form = supabase.table('consultation_forms').select('id, form_data').eq(
@@ -4905,16 +4919,6 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
                 print(f"❌ Error updating form: {str(e)}")
                 # Don't fail the entire request if update fails
                 # The extraction was successful, just log the error
-
-        # Step 6b: Update consultation with detected_consultation_type
-        try:
-            supabase.table('consultations').update({
-                'detected_consultation_type': consultation_type
-            }).eq('id', request.consultation_id).execute()
-            print(f"✅ Updated consultation with detected type: {consultation_type}")
-        except Exception as e:
-            print(f"⚠️ Failed to update consultation detected_consultation_type: {e}")
-            # Don't fail the request if this update fails
 
         # Step 7: Return success
         return AutoFillConsultationFormResponse(
