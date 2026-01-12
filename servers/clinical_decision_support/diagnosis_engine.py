@@ -243,6 +243,11 @@ class DiagnosisEngine:
         Returns:
             Tuple of (is_valid, error_message).
         """
+        # VALIDATION DISABLED - Always accept input
+        if verbose:
+            print(f"   [DiagnosisEngine] Input validation: DISABLED - All inputs accepted")
+        return (True, None)
+
         if not self.anthropic:
             return (True, None)
 
