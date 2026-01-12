@@ -199,3 +199,139 @@ For each diagnosis, include:
 - The source article title and DOI
 - The level of evidence (systematic review, RCT, cohort study, etc.)
 - Evidence-based recommendations from the literature"""
+
+
+def get_research_analysis_prompt(clinical_scenario: str, min_date: str, quartile_filter: str = "Q1-Q2") -> str:
+    """
+    Generate a prompt for research paper-based clinical analysis.
+
+    This prompt focuses on recent, high-quality research from Q1/Q2 journals.
+    It's designed for the ResearchAnalysisEngine which uses PubMed, BMJ, and Scopus.
+
+    Args:
+        clinical_scenario: The clinical consultation text
+        min_date: Minimum publication year (e.g., "2021" for last 5 years)
+        quartile_filter: Journal quality filter (default: "Q1-Q2")
+
+    Returns:
+        Formatted prompt string for research-based analysis
+    """
+    quartile_desc = {
+        "Q1": "top 25% (Q1 only) - highest impact",
+        "Q1-Q2": "top 50% (Q1 and Q2) - high impact",
+        "Q2": "25-50th percentile (Q2 only)"
+    }.get(quartile_filter, "top 50%")
+
+    return f"""Analyze this clinical consultation using LATEST RESEARCH from high-quality medical journals.
+
+CONSULTATION: {clinical_scenario}
+
+RESEARCH FOCUS:
+- TIME PERIOD: Papers published from {min_date} onwards (last 5 years)
+- JOURNAL QUALITY: {quartile_desc} journals only
+- SOURCES: BMJ publications, Scopus-indexed journals, PubMed database
+
+TASK:
+1. Use the available research tools (search_bmj, search_scopus, search_pubmed) to find recent evidence
+2. Focus on:
+   - Recent systematic reviews and meta-analyses
+   - High-quality randomized controlled trials (RCTs)
+   - Clinical guidelines based on latest evidence
+   - Novel treatment approaches published recently
+3. For Scopus searches, use quartile_filter="{quartile_filter}" parameter
+4. Retrieve full article details to extract evidence-based recommendations
+
+IMPORTANT INSTRUCTIONS:
+1. DO NOT use drug lookup tools (BNF, DrugBank, MIMS) - provide generic drug names only
+2. Cite specific research papers with DOI/PMID in your recommendations
+3. Indicate the level of evidence for each recommendation (Level I-IV)
+4. Focus on "what's new" - recent findings that may differ from older guidelines
+5. Return your answer QUICKLY - drug details will be looked up separately
+
+Return your final answer as JSON ONLY (no other text):
+
+{{
+  "diagnoses": [
+    {{
+      "diagnosis": "medical condition name",
+      "confidence": "high|medium|low",
+      "reasoning": "Brief explanation based on research findings",
+
+      "research_citations": [
+        {{
+          "pmid": "PubMed ID if available",
+          "doi": "DOI if available (e.g., 10.1136/bmj.xyz)",
+          "title": "Research paper title",
+          "journal": "Journal name",
+          "year": 2024,
+          "authors": ["First Author et al"],
+          "study_type": "systematic review|RCT|cohort study|case series",
+          "evidence_level": "Level I|II|III|IV"
+        }}
+      ],
+
+      "primary_care": {{
+        "medications": [
+          {{"drug_name": "Drug Name", "variations": ["Drug Name", "Drug Name Hydrochloride"]}}
+        ],
+        "supportive_care": ["Non-pharmacological interventions from research"],
+        "clinical_guidance": "Dosing and administration based on research evidence",
+        "when_to_escalate": ["Red flags from research literature"]
+      }},
+
+      "surgery": {{
+        "indicated": true,
+        "procedure": "Surgical procedure name from research",
+        "evidence": "Research evidence supporting surgical approach",
+        "phases": {{
+          "preoperative": {{
+            "investigations": ["Tests recommended by research"],
+            "medications": [{{"drug_name": "Drug", "variations": ["Drug"]}}],
+            "preparation": ["Preparation steps from research protocols"]
+          }},
+          "operative": {{
+            "technique": "Surgical technique from research",
+            "anesthesia": "Anesthesia approach",
+            "duration": "Duration if mentioned"
+          }},
+          "postoperative": {{
+            "immediate_care": ["Post-op care from research"],
+            "medications": [{{"drug_name": "Drug", "variations": ["Drug"]}}],
+            "mobilization": "Mobilization protocol from research",
+            "complications": ["Complications reported in literature"]
+          }}
+        }}
+      }},
+
+      "diagnostics": {{
+        "required": ["Investigations recommended by research"],
+        "monitoring": ["Monitoring parameters from studies"],
+        "referral_criteria": ["Referral criteria from guidelines/research"]
+      }},
+
+      "follow_up": {{
+        "timeframe": "Follow-up schedule from research",
+        "monitoring": ["Monitoring based on research protocols"],
+        "referral_criteria": ["When to escalate based on evidence"]
+      }}
+    }}
+  ]
+}}
+
+STRUCTURE GUIDELINES:
+1. ALWAYS include primary_care for every diagnosis
+2. Include research_citations array with full citation details (DOI, PMID, journal, year)
+3. Mark evidence_level for each citation (Level I = systematic review/meta-analysis, Level II = RCT, etc.)
+4. Omit surgery section if no surgical intervention needed
+5. Omit diagnostics section if no investigations required
+6. Use medication object format with drug_name and variations arrays
+7. Focus on RECENT evidence (from {min_date} onwards)
+8. Cite HIGH-QUALITY journals only (Q1/Q2)
+
+RESEARCH QUALITY STANDARDS:
+- Systematic reviews and meta-analyses (Level I evidence) are preferred
+- Large RCTs from high-impact journals (Level II evidence)
+- Cohort studies from Q1/Q2 journals (Level III evidence)
+- Avoid case reports unless from top-tier journals
+
+Return structured JSON with research-based recommendations and full citations."""

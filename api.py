@@ -207,6 +207,14 @@ class AnalysisRequest(BaseModel):
     location_override: Optional[str] = None  # Optional manual country override
 
 
+class ResearchAnalysisRequest(BaseModel):
+    """Request body for research paper-based analysis"""
+    consultation_id: str
+    include_guidelines: bool = True  # Whether to include guideline context
+    date_filter: int = 5  # Years to look back (default: 5)
+    quartile_filter: str = "Q1-Q2"  # Journal quality filter (default: Q1-Q2)
+
+
 class HealthResponse(BaseModel):
     """Health check response"""
     status: str
@@ -638,6 +646,134 @@ async def get_examples():
             }
         ]
     }
+
+
+@app.post("/api/analyze-research")
+async def analyze_consultation_with_research(request: ResearchAnalysisRequest):
+    """
+    Re-analyze existing consultation using latest research papers.
+
+    This endpoint fetches an existing consultation and runs research paper-based
+    analysis using PubMed, BMJ, and Scopus Q1/Q2 journals. The research findings
+    are appended to the consultation (not replacing guideline-based findings).
+
+    Args:
+        request: ResearchAnalysisRequest with consultation_id and filter parameters
+
+    Returns:
+        Updated consultation object with research_findings populated
+    """
+    from supabase import create_client, Client
+    from servers.clinical_decision_support.research_analysis import ResearchAnalysisEngine
+
+    try:
+        # Initialize Supabase client
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(
+                status_code=500,
+                detail="Supabase configuration missing"
+            )
+
+        supabase: Client = create_client(supabase_url, supabase_key)
+
+        print(f"\n{'='*70}")
+        print(f"📄 RESEARCH ANALYSIS REQUEST")
+        print(f"{'='*70}")
+        print(f"Consultation ID: {request.consultation_id}")
+        print(f"Date Filter: Last {request.date_filter} years")
+        print(f"Quartile Filter: {request.quartile_filter}")
+        print(f"{'='*70}\n")
+
+        # Fetch the existing consultation from Supabase
+        result = supabase.table("consultations").select("*").eq("id", request.consultation_id).execute()
+
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Consultation {request.consultation_id} not found"
+            )
+
+        consultation = result.data[0]
+        consultation_text = consultation.get("consultation_text", "")
+
+        if not consultation_text:
+            raise HTTPException(
+                status_code=400,
+                detail="Consultation has no consultation_text to analyze"
+            )
+
+        print(f"📝 Consultation text length: {len(consultation_text)} characters")
+
+        # Initialize Research Analysis Engine
+        research_engine = ResearchAnalysisEngine()
+
+        # Connect to research MCP servers
+        await research_engine.connect_research_servers(verbose=True)
+
+        # Run research paper analysis
+        print(f"\n🔬 Running research paper analysis...")
+        diagnoses, tool_calls = await research_engine.analyze_with_research_papers(
+            clinical_scenario=consultation_text,
+            date_filter=request.date_filter,
+            quartile_filter=request.quartile_filter,
+            verbose=True
+        )
+
+        # Disconnect from servers
+        await research_engine.disconnect(verbose=True)
+
+        # Build research_findings object
+        research_findings = {
+            "diagnoses": diagnoses,
+            "papers_reviewed": [
+                {
+                    "tool_name": tc["tool_name"],
+                    "tool_input": tc["tool_input"]
+                }
+                for tc in tool_calls
+            ],
+            "analysis_date": datetime.now(timezone.utc).isoformat(),
+            "filters_applied": {
+                "date_range": f"{datetime.now().year - request.date_filter}-{datetime.now().year}",
+                "quartile": request.quartile_filter,
+                "databases": ["BMJ", "Scopus", "PubMed"]
+            }
+        }
+
+        print(f"\n✅ Research analysis complete:")
+        print(f"   - Diagnoses found: {len(diagnoses)}")
+        print(f"   - Papers reviewed: {len(tool_calls)}")
+
+        # Update consultation in Supabase
+        update_result = supabase.table("consultations").update({
+            "research_findings": research_findings
+        }).eq("id", request.consultation_id).execute()
+
+        if not update_result.data:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to update consultation with research findings"
+            )
+
+        updated_consultation = update_result.data[0]
+
+        print(f"\n💾 Consultation updated in database")
+        print(f"{'='*70}\n")
+
+        return updated_consultation
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Research analysis error: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Research analysis failed: {str(e)}"
+        )
 
 
 @app.post("/api/translate")
