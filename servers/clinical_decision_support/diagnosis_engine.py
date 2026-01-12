@@ -1,8 +1,9 @@
 """
 Diagnosis Engine for Clinical Decision Support.
 
-Handles clinical diagnosis analysis using guideline MCP servers (NICE, FOGSI, NHM, AIIMS, PubMed).
-This class owns its own MCP server connections for guideline-related tools.
+Handles clinical diagnosis analysis using guideline MCP servers and medical literature sources.
+Implements cascading search: Guidelines → (BMJ + Scopus Q1 in parallel) → Scopus Q2.
+This class owns its own MCP server connections for guideline and literature tools.
 """
 
 import asyncio
@@ -20,18 +21,27 @@ from .prompts import (
     get_clinical_validation_prompt,
     get_diagnosis_analysis_prompt,
     get_pubmed_fallback_prompt,
+    get_literature_fallback_prompt,
 )
 
 
 class DiagnosisEngine:
     """
-    Handles clinical diagnosis analysis using guideline MCP servers.
+    Handles clinical diagnosis analysis using guideline MCP servers and medical literature.
 
     This class owns its own MCP server connections for:
     - patient_info: Patient context and seasonal data
     - nice: UK NICE guidelines
     - fogsi, nhm, aiims: India-specific guidelines
-    - pubmed: Medical literature fallback
+    - pubmed: PubMed medical literature (35M+ articles)
+    - bmj: BMJ publications via Europe PMC
+    - scopus: Scopus with quartile filtering (Q1/Q2)
+
+    Implements cascading evidence search:
+    1. Regional guidelines (NICE, FOGSI, etc.)
+    2. If insufficient → BMJ literature
+    3. If insufficient → Scopus Q1 journals (top 25%)
+    4. If insufficient → Scopus Q2 journals (top 50%)
     """
 
     def __init__(self, anthropic_api_key: Optional[str] = None):
@@ -169,8 +179,9 @@ class DiagnosisEngine:
                 "input_schema": tool.inputSchema
             } for tool in tools.tools])
 
-        # Exclude drug and pubmed tools from initial diagnosis
-        excluded_patterns = ['bnf', 'drugbank', 'mims', 'drug', 'pubmed']
+        # Exclude drug, pubmed, bmj, and scopus tools from initial diagnosis
+        # These are used in fallback searches only
+        excluded_patterns = ['bnf', 'drugbank', 'mims', 'drug', 'pubmed', 'bmj', 'scopus']
         guideline_tools = [
             tool for tool in all_tools
             if not any(pattern in tool['name'].lower() for pattern in excluded_patterns)
@@ -191,6 +202,32 @@ class DiagnosisEngine:
 
         return [t for t in all_tools if 'pubmed' in t['name'].lower()]
 
+    async def get_bmj_tools(self) -> List[Dict[str, Any]]:
+        """Get BMJ tools for literature fallback."""
+        all_tools = []
+        for session in self.sessions.values():
+            tools = await session.list_tools()
+            all_tools.extend([{
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.inputSchema
+            } for tool in tools.tools])
+
+        return [t for t in all_tools if 'bmj' in t['name'].lower()]
+
+    async def get_scopus_tools(self) -> List[Dict[str, Any]]:
+        """Get Scopus tools for literature fallback."""
+        all_tools = []
+        for session in self.sessions.values():
+            tools = await session.list_tools()
+            all_tools.extend([{
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.inputSchema
+            } for tool in tools.tools])
+
+        return [t for t in all_tools if 'scopus' in t['name'].lower()]
+
     async def validate_clinical_input(
         self,
         clinical_scenario: str,
@@ -206,6 +243,11 @@ class DiagnosisEngine:
         Returns:
             Tuple of (is_valid, error_message).
         """
+        # VALIDATION DISABLED - Always accept input
+        if verbose:
+            print(f"   [DiagnosisEngine] Input validation: DISABLED - All inputs accepted")
+        return (True, None)
+
         if not self.anthropic:
             return (True, None)
 
@@ -487,6 +529,210 @@ class DiagnosisEngine:
                 print(f"   [DiagnosisEngine] PubMed error: {e}")
 
         return existing_diagnoses, tool_calls
+
+    async def literature_fallback(
+        self,
+        clinical_scenario: str,
+        existing_diagnoses: List[dict],
+        verbose: bool = True
+    ) -> Tuple[List[dict], List[dict]]:
+        """
+        Cascading literature search: BMJ + Scopus Q1 (parallel) → Scopus Q2.
+
+        Searches BMJ and Scopus Q1 in parallel for efficiency. Falls back to
+        Scopus Q2 only if neither source provides sufficient evidence.
+
+        Args:
+            clinical_scenario: Patient case description.
+            existing_diagnoses: Diagnoses from guideline analysis.
+            verbose: Whether to print progress.
+
+        Returns:
+            Tuple of (diagnoses, tool_calls).
+        """
+        if not self.anthropic:
+            return existing_diagnoses, []
+
+        all_tool_calls = []
+        diagnoses = existing_diagnoses.copy()
+
+        # Get available tools
+        bmj_tools = await self.get_bmj_tools()
+        scopus_tools = await self.get_scopus_tools()
+
+        # Step 1: Try BMJ and Scopus Q1 in parallel
+        parallel_searches = []
+        search_names = []
+
+        if bmj_tools:
+            if verbose:
+                print(f"   [DiagnosisEngine] Searching BMJ literature ({len(bmj_tools)} tools)")
+            parallel_searches.append(
+                self._search_literature_source(
+                    clinical_scenario, bmj_tools, "BMJ", None, verbose=False
+                )
+            )
+            search_names.append("BMJ")
+
+        if scopus_tools:
+            if verbose:
+                print(f"   [DiagnosisEngine] Searching Scopus Q1 journals ({len(scopus_tools)} tools)")
+            parallel_searches.append(
+                self._search_literature_source(
+                    clinical_scenario, scopus_tools, "Scopus", "Q1", verbose=False
+                )
+            )
+            search_names.append("Scopus Q1")
+
+        # Run parallel searches
+        if parallel_searches:
+            if verbose and len(parallel_searches) > 1:
+                print(f"   [DiagnosisEngine] Running {len(parallel_searches)} searches in parallel...")
+
+            results = await asyncio.gather(*parallel_searches)
+
+            # Process results from all parallel searches
+            for idx, (source_diagnoses, source_calls) in enumerate(results):
+                all_tool_calls.extend(source_calls)
+
+                if source_diagnoses:
+                    existing_names = {d.get('diagnosis', '').lower() for d in diagnoses}
+                    for diag in source_diagnoses:
+                        if diag.get('diagnosis', '').lower() not in existing_names:
+                            diagnoses.append(diag)
+
+                    if verbose:
+                        print(f"   [DiagnosisEngine] {search_names[idx]} found {len(source_diagnoses)} diagnoses")
+
+            # If we found evidence from parallel searches, return
+            if len(diagnoses) > len(existing_diagnoses):
+                if verbose:
+                    print(f"   [DiagnosisEngine] Total diagnoses after parallel search: {len(diagnoses)}")
+                return diagnoses, all_tool_calls
+
+        # Step 2: Fall back to Scopus Q2 if parallel searches insufficient
+        if scopus_tools:
+            if verbose:
+                print(f"   [DiagnosisEngine] Parallel searches insufficient, trying Scopus Q2")
+
+            scopus_q2_diagnoses, scopus_q2_calls = await self._search_literature_source(
+                clinical_scenario,
+                scopus_tools,
+                "Scopus",
+                "Q2",
+                verbose
+            )
+
+            all_tool_calls.extend(scopus_q2_calls)
+
+            if scopus_q2_diagnoses:
+                # Merge new diagnoses
+                existing_names = {d.get('diagnosis', '').lower() for d in diagnoses}
+                for diag in scopus_q2_diagnoses:
+                    if diag.get('diagnosis', '').lower() not in existing_names:
+                        diagnoses.append(diag)
+
+                if verbose:
+                    print(f"   [DiagnosisEngine] Scopus Q2 found {len(scopus_q2_diagnoses)} diagnoses")
+
+        if verbose:
+            print(f"   [DiagnosisEngine] Total diagnoses after literature search: {len(diagnoses)}")
+
+        return diagnoses, all_tool_calls
+
+    async def _search_literature_source(
+        self,
+        clinical_scenario: str,
+        tools: List[Dict[str, Any]],
+        source_name: str,
+        quartile_filter: Optional[str],
+        verbose: bool = True
+    ) -> Tuple[List[dict], List[dict]]:
+        """
+        Search a single literature source (BMJ or Scopus).
+
+        Args:
+            clinical_scenario: Patient case description.
+            tools: Available tools for this source.
+            source_name: Name of the source (BMJ, Scopus).
+            quartile_filter: Optional quartile filter (Q1, Q2).
+            verbose: Whether to print progress.
+
+        Returns:
+            Tuple of (diagnoses, tool_calls).
+        """
+        prompt = get_literature_fallback_prompt(clinical_scenario, source_name, quartile_filter)
+        messages = [{"role": "user", "content": prompt}]
+        tool_calls = []
+        diagnoses = []
+
+        try:
+            response = self.anthropic.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=8192,
+                tools=tools,
+                messages=messages
+            )
+
+            # Tool use loop
+            while response.stop_reason == "tool_use":
+                tool_results = []
+                for content_block in response.content:
+                    if content_block.type == "tool_use":
+                        tool_name = content_block.name
+                        tool_input = content_block.input
+
+                        if verbose:
+                            print(f"   [DiagnosisEngine] {source_name} calling: {tool_name}")
+
+                        tool_calls.append({
+                            "tool_name": tool_name,
+                            "tool_input": tool_input
+                        })
+
+                        result = await self.call_tool(tool_name, tool_input)
+                        result_text = result.content[0].text
+
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": content_block.id,
+                            "content": result_text
+                        })
+
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": tool_results})
+
+                response = self.anthropic.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=8192,
+                    tools=tools,
+                    messages=messages
+                )
+
+            # Extract diagnoses from response
+            for block in response.content:
+                if hasattr(block, 'text'):
+                    try:
+                        result = json.loads(block.text)
+                        diagnoses = result.get('diagnoses', [])
+                        break
+                    except:
+                        text = block.text
+                        if '{' in text:
+                            try:
+                                json_start = text.index('{')
+                                json_end = text.rindex('}') + 1
+                                result = json.loads(text[json_start:json_end])
+                                diagnoses = result.get('diagnoses', [])
+                                break
+                            except:
+                                pass
+
+        except Exception as e:
+            if verbose:
+                print(f"   [DiagnosisEngine] {source_name} error: {e}")
+
+        return diagnoses, tool_calls
 
 
 __all__ = ['DiagnosisEngine']

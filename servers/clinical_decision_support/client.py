@@ -208,18 +208,19 @@ class ClinicalDecisionSupportClient:
         if verbose:
             print(f"   Extracted {len(diagnoses)} diagnoses")
 
-        # Step 1.5: PubMed fallback if needed
+        # Step 1.5: Literature fallback if needed (BMJ → Scopus Q1 → Scopus Q2)
         MIN_DIAGNOSES_THRESHOLD = 1
 
         if len(diagnoses) < MIN_DIAGNOSES_THRESHOLD:
             if verbose:
-                print(f"\nStep 1.5: PubMed fallback (only {len(diagnoses)} diagnoses)...")
+                print(f"\nStep 1.5: Literature fallback (only {len(diagnoses)} diagnoses)...")
+                print(f"   Cascading search: Guidelines → BMJ → Scopus Q1 → Scopus Q2")
 
-            diagnoses, pubmed_tool_calls = await self.diagnosis_engine.pubmed_fallback(
+            diagnoses, lit_tool_calls = await self.diagnosis_engine.literature_fallback(
                 clinical_scenario, diagnoses, verbose=verbose
             )
 
-            for tool_call in pubmed_tool_calls:
+            for tool_call in lit_tool_calls:
                 if progress_callback:
                     await progress_callback("tool_call", tool_call)
 
@@ -374,18 +375,19 @@ class ClinicalDecisionSupportClient:
         if verbose:
             print(f"   Extracted {len(diagnoses)} diagnoses")
 
-        # Step 1.5: PubMed fallback if needed
+        # Step 1.5: Literature fallback if needed (BMJ → Scopus Q1 → Scopus Q2)
         MIN_DIAGNOSES_THRESHOLD = 1
 
         if len(diagnoses) < MIN_DIAGNOSES_THRESHOLD:
             if verbose:
-                print(f"\nStep 1.5: PubMed fallback (only {len(diagnoses)} diagnoses)...")
+                print(f"\nStep 1.5: Literature fallback (only {len(diagnoses)} diagnoses)...")
+                print(f"   Cascading search: Guidelines → BMJ → Scopus Q1 → Scopus Q2")
 
-            diagnoses, pubmed_tool_calls = await self.diagnosis_engine.pubmed_fallback(
+            diagnoses, lit_tool_calls = await self.diagnosis_engine.literature_fallback(
                 clinical_scenario, diagnoses, verbose=verbose
             )
 
-            for tool_call in pubmed_tool_calls:
+            for tool_call in lit_tool_calls:
                 if progress_callback:
                     await progress_callback("tool_call", tool_call)
 

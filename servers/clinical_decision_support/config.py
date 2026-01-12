@@ -161,7 +161,9 @@ MCP_SERVERS = {
     "aiims": str(SERVERS_DIR / "guidelines" / "india" / "aiims_server.py"),  # AIIMS Trauma & Orthopedic Protocols (India)
     "drugbank": str(SERVERS_DIR / "drug_lookup" / "drugbank_server.py"),  # DrugBank (India + International)
     "mims": str(SERVERS_DIR / "drug_lookup" / "mims_india_server.py"),  # MIMS Drug Info (India) - reserved for future API access
-    "pubmed": str(SERVERS_DIR / "medical_literature" / "pubmed_server.py")
+    "pubmed": str(SERVERS_DIR / "medical_literature" / "pubmed_server.py"),
+    "bmj": str(SERVERS_DIR / "medical_literature" / "bmj_server.py"),  # BMJ Publications (Europe PMC)
+    "scopus": str(SERVERS_DIR / "medical_literature" / "scopus_server.py")  # Scopus with quartile filtering
 }
 
 # Region-specific server mapping (generated from REGION_CONFIGS)
@@ -175,8 +177,8 @@ for region_key, config in REGION_CONFIGS.items():
 # Server Groupings for Engine-Based Architecture
 # ============================================================================
 
-# Servers owned by DiagnosisEngine (guidelines + patient context)
-GUIDELINE_SERVERS = ["patient_info", "nice", "fogsi", "nhm", "aiims", "pubmed"]
+# Servers owned by DiagnosisEngine (guidelines + patient context + medical literature)
+GUIDELINE_SERVERS = ["patient_info", "nice", "fogsi", "nhm", "aiims", "pubmed", "bmj", "scopus"]
 
 # Servers owned by DrugInfoRetriever (drug information)
 DRUG_SERVERS = ["bnf", "drugbank"]

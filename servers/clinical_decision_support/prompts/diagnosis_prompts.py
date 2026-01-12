@@ -162,3 +162,40 @@ CONSULTATION: {clinical_scenario}
 
 Use the available PubMed tools to search for relevant medical literature and provide evidence-based recommendations.
 Return the same JSON structure as before with diagnoses, treatments, and guidance based on the literature you find."""
+
+
+def get_literature_fallback_prompt(clinical_scenario: str, source_name: str, quartile_filter: str = None) -> str:
+    """
+    Generate a prompt for BMJ/Scopus fallback when guidelines don't provide sufficient info.
+
+    Args:
+        clinical_scenario: The clinical consultation text
+        source_name: Name of the literature source (BMJ, Scopus)
+        quartile_filter: Optional quartile filter (Q1, Q2) for Scopus
+
+    Returns:
+        Formatted prompt string for literature search
+    """
+    quartile_guidance = ""
+    if quartile_filter:
+        quartile_desc = "top 25% (Q1)" if quartile_filter == "Q1" else "top 50% (Q1-Q2)"
+        quartile_guidance = f"""
+IMPORTANT: Focus on HIGH-IMPACT RESEARCH from {quartile_desc} journals.
+Use the quartile filtering tools to ensure you're citing the most reputable sources."""
+
+    return f"""The local guidelines did not provide sufficient information for this clinical scenario.
+Search {source_name} medical literature for evidence-based guidance.
+
+CONSULTATION: {clinical_scenario}
+{quartile_guidance}
+
+Use the available {source_name} tools to:
+1. Search for relevant medical literature (recent systematic reviews, meta-analyses, clinical trials)
+2. Retrieve full article details for the most relevant papers
+3. Extract evidence-based recommendations for diagnosis and treatment
+
+Return the same JSON structure as before with diagnoses, treatments, and guidance.
+For each diagnosis, include:
+- The source article title and DOI
+- The level of evidence (systematic review, RCT, cohort study, etc.)
+- Evidence-based recommendations from the literature"""
