@@ -180,6 +180,9 @@ for region_key, config in REGION_CONFIGS.items():
 # Servers owned by DiagnosisEngine (guidelines + patient context + medical literature)
 GUIDELINE_SERVERS = ["patient_info", "nice", "fogsi", "nhm", "aiims", "pubmed", "bmj", "scopus"]
 
+# Research paper servers (for research-based analysis)
+RESEARCH_SERVERS = ["pubmed", "bmj", "scopus"]
+
 # Servers owned by DrugInfoRetriever (drug information)
 DRUG_SERVERS = ["bnf", "drugbank"]
 
@@ -194,5 +197,6 @@ __all__ = [
     'MCP_SERVERS',
     'REGION_SERVERS',
     'GUIDELINE_SERVERS',
+    'RESEARCH_SERVERS',
     'DRUG_SERVERS'
 ]
