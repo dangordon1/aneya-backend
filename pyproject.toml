@@ -5,6 +5,7 @@ description = "Clinical Decision Support System with multi-server MCP architectu
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.43.1",
+    "bcrypt>=4.0.0",
     "beautifulsoup4>=4.14.2",
     "deep-translator>=1.11.0",
     "elevenlabs>=1.0.0",
