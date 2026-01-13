@@ -17,6 +17,14 @@ def get_clinical_validation_prompt(clinical_scenario: str) -> str:
     """
     return f"""You are a medical consultation validator. Your job is to determine if the following text represents a genuine clinical consultation or medical scenario.
 
+IMPORTANT: Be LENIENT with transcribed conversations that may have:
+- Grammar errors or poor sentence structure
+- Repetitions or fragmented dialogue
+- Unclear phrasing or translation issues
+- Conversational filler words or incomplete sentences
+
+As long as the text contains ANY genuine medical content (symptoms, conditions, patient details, medical history), mark it as VALID.
+
 TEXT TO VALIDATE:
 {clinical_scenario}
 
@@ -26,13 +34,16 @@ VALID clinical consultations include:
 - Medical history and examination findings
 - Requests for clinical decision support or treatment guidance
 - Diagnostic scenarios
+- Transcribed conversations with medical terminology, even if poorly structured
+- Discussions mentioning conditions, medications, symptoms, or patient details
 
-INVALID inputs include:
-- Random statements unrelated to medicine (e.g., "I am feeling autistic", "What's the weather")
-- General questions not about a specific patient case
-- Non-medical topics
-- Personal statements that aren't medical consultations
-- Test inputs or nonsense text
+INVALID inputs (only reject clearly non-medical content):
+- Completely unrelated to medicine (e.g., "What's the weather", "Hello world")
+- No medical context whatsoever
+- Pure test inputs with no clinical information (e.g., "test test test")
+- Marketing or spam content
+
+If there is ANY legitimate medical content, symptoms, conditions, or patient information present, mark it as VALID even if the text is poorly formatted or fragmented.
 
 Respond with ONLY a JSON object:
 {{

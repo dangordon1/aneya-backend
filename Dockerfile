@@ -8,12 +8,13 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Install system dependencies (including ffmpeg for audio conversion)
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     libxml2-dev \
     libxslt-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -27,7 +28,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY api.py .
+COPY pdf_generator.py .
+COPY custom_forms_api.py .
+COPY historical_forms_api.py .
+COPY doctor_logo_api.py .
 COPY servers/ ./servers/
+COPY mcp_servers/ ./mcp_servers/
+COPY tools/ ./tools/
+COPY migrations/ ./migrations/
+COPY historical_forms/ ./historical_forms/
 
 # Create a non-root user
 RUN useradd -m -u 1000 aneya && chown -R aneya:aneya /app

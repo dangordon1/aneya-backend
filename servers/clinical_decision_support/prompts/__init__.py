@@ -13,6 +13,7 @@ from .validation_prompts import (
 from .diagnosis_prompts import (
     get_diagnosis_analysis_prompt,
     get_pubmed_fallback_prompt,
+    get_literature_fallback_prompt,
 )
 
 from .drug_prompts import (
@@ -35,6 +36,7 @@ __all__ = [
     # Diagnosis
     'get_diagnosis_analysis_prompt',
     'get_pubmed_fallback_prompt',
+    'get_literature_fallback_prompt',
     # Drug
     'get_drug_validation_prompt',
     'get_drug_info_generation_prompt',

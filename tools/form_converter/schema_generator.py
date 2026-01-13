@@ -21,6 +21,8 @@ class SchemaGenerator:
         'checkbox_group': 'object',
         'radio': 'string',
         'dropdown': 'string',
+        'table': 'array',
+        'table_transposed': 'array',
     }
 
     # Max length defaults by input type
@@ -47,7 +49,7 @@ class SchemaGenerator:
         Generate complete Aneya form schema.
 
         Returns:
-            Dictionary in Aneya schema format
+            Dictionary in Aneya schema format (sections as keys, each with description and fields)
         """
         schema = {}
 
@@ -58,14 +60,12 @@ class SchemaGenerator:
             if not fields:
                 continue
 
-            # Determine if this is an object (has nested fields) or flat fields
-            if self._should_be_object_section(section):
-                schema[section_name] = self._generate_object_section(section)
-            else:
-                # Add fields directly to schema (flat structure)
-                for field in fields:
-                    field_schema = self._generate_field_schema(field)
-                    schema[field['name']] = field_schema
+            # Always use object section format for consistency (frontend expects this)
+            schema[section_name] = {
+                "description": section.get('description', ''),
+                "order": section.get('order', 0),
+                "fields": [self._generate_field_schema(field) for field in fields]
+            }
 
         return schema
 
@@ -139,13 +139,17 @@ class SchemaGenerator:
             field: Field definition
 
         Returns:
-            Field schema in Aneya format
+            Field schema in Aneya format (includes name, label, type, etc.)
         """
         input_type = field.get('input_type', 'text_short')
         field_type = self.TYPE_MAPPING.get(input_type, 'string')
 
         schema = {
+            "name": field.get('name'),
+            "label": field.get('label', field.get('name', '')),
             "type": field_type,
+            "input_type": input_type,
+            "required": field.get('required', False),
             "description": field.get('description', field.get('label', '')),
         }
 
@@ -170,6 +174,26 @@ class SchemaGenerator:
         elif field_type == 'object':
             # For checkbox groups or nested objects
             schema['fields'] = {}
+
+        elif field_type == 'array':
+            # For tables/repeatable data structures
+            if 'row_fields' in field and field['row_fields']:
+                # Table with defined column structure
+                schema['row_fields'] = field['row_fields']
+            else:
+                # Simple array
+                schema['item_type'] = 'string'
+
+            # Preserve table metadata for editability
+            if 'column_names' in field:
+                schema['column_names'] = field['column_names']
+
+            if 'row_names' in field:
+                schema['row_names'] = field['row_names']
+
+            # Preserve input_type to distinguish table vs table_transposed
+            if 'input_type' in field:
+                schema['input_type'] = field['input_type']
 
         # Generate extraction hints
         schema['extraction_hints'] = self._generate_extraction_hints(field)

@@ -409,3 +409,5 @@ reportlab>=4.0.0
     # via heidi (PDF generation for consultation forms)
 cairosvg>=2.7.0
     # via heidi (SVG to PNG conversion for clinic logos)
+sarvamai>=0.0.1
+    # via heidi (Sarvam AI for Indian language diarization)

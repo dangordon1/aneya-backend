@@ -4,6 +4,10 @@ Aneya API - FastAPI Backend
 Wraps the Clinical Decision Support Client for the React frontend
 """
 
+# Suppress Pydantic deprecation warnings from third-party libraries (pyiceberg)
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pyiceberg")
+
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, BackgroundTasks, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -22,10 +26,14 @@ import tempfile
 import time
 import asyncio
 import uuid
+import traceback
 from datetime import datetime, timezone
 from google.cloud import storage
+from pdf_generator import generate_consultation_pdf
 import firebase_admin
 from firebase_admin import credentials
+from functools import lru_cache
+import copy
 
 # Load environment variables from .env file
 load_dotenv()
@@ -44,6 +52,32 @@ if not firebase_admin._apps:
         print(f"✅ Firebase Admin SDK initialized (project: {FIREBASE_PROJECT_ID})")
     except Exception as e:
         print(f"⚠️  Firebase Admin SDK initialization warning: {e}")
+
+
+def get_git_branch() -> str:
+    """Get current git branch name"""
+    # First try environment variable (for production/Cloud Run)
+    branch = os.getenv("GIT_BRANCH")
+    if branch:
+        return branch
+
+    # Fall back to git command (for local development)
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=str(Path(__file__).parent)
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception as e:
+        print(f"⚠️  Failed to get git branch: {e}")
+
+    return "unknown"
+
 
 # Add servers directory to path (servers is in the backend repo root)
 sys.path.insert(0, str(Path(__file__).parent / "servers"))
@@ -65,6 +99,7 @@ async def lifespan(app: FastAPI):
 
     # Startup
     print("🚀 Starting Aneya API...")
+    print(f"🌿 Running on branch: {get_git_branch()}")
 
     # Check for Anthropic API key - REQUIRED!
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -136,6 +171,8 @@ app.add_middleware(
         "http://localhost:5175",  # Local development (alternative port)
         "http://localhost:5176",  # Local development (alternative port)
         "http://localhost:3000",
+        "http://localhost:9000",  # Local development (alternative port)
+        "http://localhost:9001",  # Local development (alternative port)
         "https://aneya.vercel.app",  # Production frontend
         "https://aneya.health",  # Custom domain
         "https://www.aneya.health",  # Custom domain with www
@@ -152,6 +189,10 @@ app.include_router(doctor_logo_router)
 # Include auth API router (OTP email verification)
 from routers.auth import router as auth_router
 app.include_router(auth_router)
+
+# Include custom forms API router
+from custom_forms_api import router as custom_forms_router
+app.include_router(custom_forms_router)
 
 
 class AnalysisRequest(BaseModel):
@@ -170,10 +211,19 @@ class AnalysisRequest(BaseModel):
     location_override: Optional[str] = None  # Optional manual country override
 
 
+class ResearchAnalysisRequest(BaseModel):
+    """Request body for research paper-based analysis"""
+    consultation_id: str
+    include_guidelines: bool = True  # Whether to include guideline context
+    date_filter: int = 5  # Years to look back (default: 5)
+    quartile_filter: str = "Q1-Q2"  # Journal quality filter (default: Q1-Q2)
+
+
 class HealthResponse(BaseModel):
     """Health check response"""
     status: str
     message: str
+    branch: str = "unknown"
 
 
 async def get_country_from_ip(ip_address: str) -> Optional[dict]:
@@ -213,7 +263,8 @@ async def root():
     """Root endpoint"""
     return {
         "status": "ok",
-        "message": "Aneya Clinical Decision Support API is running"
+        "message": "Aneya Clinical Decision Support API is running",
+        "branch": get_git_branch()
     }
 
 
@@ -225,7 +276,8 @@ async def health_check():
 
     return {
         "status": "healthy",
-        "message": "All systems operational"
+        "message": "All systems operational",
+        "branch": get_git_branch()
     }
 
 
@@ -237,7 +289,8 @@ async def api_health_check():
 
     return {
         "status": "healthy",
-        "message": "All systems operational"
+        "message": "All systems operational",
+        "branch": get_git_branch()
     }
 
 
@@ -597,6 +650,134 @@ async def get_examples():
             }
         ]
     }
+
+
+@app.post("/api/analyze-research")
+async def analyze_consultation_with_research(request: ResearchAnalysisRequest):
+    """
+    Re-analyze existing consultation using latest research papers.
+
+    This endpoint fetches an existing consultation and runs research paper-based
+    analysis using PubMed, BMJ, and Scopus Q1/Q2 journals. The research findings
+    are appended to the consultation (not replacing guideline-based findings).
+
+    Args:
+        request: ResearchAnalysisRequest with consultation_id and filter parameters
+
+    Returns:
+        Updated consultation object with research_findings populated
+    """
+    from supabase import create_client, Client
+    from servers.clinical_decision_support.research_analysis import ResearchAnalysisEngine
+
+    try:
+        # Initialize Supabase client
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(
+                status_code=500,
+                detail="Supabase configuration missing"
+            )
+
+        supabase: Client = create_client(supabase_url, supabase_key)
+
+        print(f"\n{'='*70}")
+        print(f"📄 RESEARCH ANALYSIS REQUEST")
+        print(f"{'='*70}")
+        print(f"Consultation ID: {request.consultation_id}")
+        print(f"Date Filter: Last {request.date_filter} years")
+        print(f"Quartile Filter: {request.quartile_filter}")
+        print(f"{'='*70}\n")
+
+        # Fetch the existing consultation from Supabase
+        result = supabase.table("consultations").select("*").eq("id", request.consultation_id).execute()
+
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Consultation {request.consultation_id} not found"
+            )
+
+        consultation = result.data[0]
+        consultation_text = consultation.get("consultation_text", "")
+
+        if not consultation_text:
+            raise HTTPException(
+                status_code=400,
+                detail="Consultation has no consultation_text to analyze"
+            )
+
+        print(f"📝 Consultation text length: {len(consultation_text)} characters")
+
+        # Initialize Research Analysis Engine
+        research_engine = ResearchAnalysisEngine()
+
+        # Connect to research MCP servers
+        await research_engine.connect_research_servers(verbose=True)
+
+        # Run research paper analysis
+        print(f"\n🔬 Running research paper analysis...")
+        diagnoses, tool_calls = await research_engine.analyze_with_research_papers(
+            clinical_scenario=consultation_text,
+            date_filter=request.date_filter,
+            quartile_filter=request.quartile_filter,
+            verbose=True
+        )
+
+        # Disconnect from servers
+        await research_engine.disconnect(verbose=True)
+
+        # Build research_findings object
+        research_findings = {
+            "diagnoses": diagnoses,
+            "papers_reviewed": [
+                {
+                    "tool_name": tc["tool_name"],
+                    "tool_input": tc["tool_input"]
+                }
+                for tc in tool_calls
+            ],
+            "analysis_date": datetime.now(timezone.utc).isoformat(),
+            "filters_applied": {
+                "date_range": f"{datetime.now().year - request.date_filter}-{datetime.now().year}",
+                "quartile": request.quartile_filter,
+                "databases": ["BMJ", "Scopus", "PubMed"]
+            }
+        }
+
+        print(f"\n✅ Research analysis complete:")
+        print(f"   - Diagnoses found: {len(diagnoses)}")
+        print(f"   - Papers reviewed: {len(tool_calls)}")
+
+        # Update consultation in Supabase
+        update_result = supabase.table("consultations").update({
+            "research_findings": research_findings
+        }).eq("id", request.consultation_id).execute()
+
+        if not update_result.data:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to update consultation with research findings"
+            )
+
+        updated_consultation = update_result.data[0]
+
+        print(f"\n💾 Consultation updated in database")
+        print(f"{'='*70}\n")
+
+        return updated_consultation
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Research analysis error: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail=f"Research analysis failed: {str(e)}"
+        )
 
 
 @app.post("/api/translate")
@@ -2747,6 +2928,202 @@ async def update_appointment_status(
     }
 
 
+@app.delete("/api/appointments/{appointment_id}")
+async def delete_appointment(appointment_id: str):
+    """
+    Delete an appointment by ID.
+
+    Args:
+        appointment_id: The ID of the appointment to delete
+
+    Returns:
+        Success response with deletion confirmation
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # Verify the appointment exists before deleting
+        get_result = supabase.table("appointments").select("id").eq("id", appointment_id).execute()
+        if not get_result.data:
+            raise HTTPException(status_code=404, detail=f"Appointment with ID {appointment_id} not found")
+
+        print(f"🗑️  Deleting appointment: {appointment_id}")
+
+        # Delete the appointment
+        supabase.table("appointments").delete().eq("id", appointment_id).execute()
+
+        print(f"✅ Appointment deleted: {appointment_id}")
+
+        return {
+            "success": True,
+            "message": f"Appointment {appointment_id} has been deleted",
+            "appointment_id": appointment_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting appointment: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete appointment: {str(e)}")
+
+
+@app.get("/api/appointments/{appointment_id}/consultation-pdf")
+async def download_consultation_pdf(appointment_id: str):
+    """
+    Generate and download a PDF of the consultation form and appointment details.
+
+    Args:
+        appointment_id: UUID of the appointment
+
+    Returns:
+        StreamingResponse with PDF file
+
+    Raises:
+        400: Invalid appointment ID format
+        404: Appointment not found or no consultation form found
+        500: PDF generation failed
+    """
+    try:
+        # Validate UUID format
+        try:
+            uuid.UUID(appointment_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid appointment ID format")
+
+        # Get Supabase client
+        supabase = get_supabase_client()
+
+        # Fetch appointment with patient and doctor data
+        print(f"📄 Fetching appointment data for PDF generation: {appointment_id}")
+
+        appointment_result = supabase.table("appointments")\
+            .select("*, patient:patients(*), doctor:doctors(*)")\
+            .eq("id", appointment_id)\
+            .execute()
+
+        if not appointment_result.data:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+
+        appointment = appointment_result.data[0]
+        patient = appointment['patient']
+
+        # Extract doctor info for PDF header (logo and clinic name)
+        doctor_info = None
+        if appointment.get('doctor'):
+            doctor_info = {
+                'clinic_name': appointment['doctor'].get('clinic_name'),
+                'clinic_logo_url': appointment['doctor'].get('clinic_logo_url')
+            }
+
+        # Fetch consultation form from new consultation_forms table
+        form_result = supabase.table("consultation_forms")\
+            .select("*")\
+            .eq("appointment_id", appointment_id)\
+            .order("created_at", desc=True)\
+            .limit(1)\
+            .execute()
+
+        if not form_result.data:
+            raise HTTPException(
+                status_code=404,
+                detail="No consultation form found for this appointment"
+            )
+
+        form_record = form_result.data[0]
+        form_data = form_record['form_data']
+        form_type = form_record['form_type']
+        specialty = form_record.get('specialty', 'general')
+        print(f"✅ Found consultation form (type: {form_type}, specialty: {specialty})")
+
+        # Look up the matching custom_form to get the PDF template
+        custom_form_result = supabase.table("custom_forms")\
+            .select("*")\
+            .ilike("form_name", f"%{form_type}%")\
+            .eq("specialty", specialty)\
+            .eq("status", "active")\
+            .limit(1)\
+            .execute()
+
+        if not custom_form_result.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active custom form template found for form type '{form_type}' and specialty '{specialty}'"
+            )
+
+        custom_form = custom_form_result.data[0]
+        pdf_template = custom_form.get('pdf_template')
+
+        if not pdf_template:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Form '{custom_form['form_name']}' does not have a PDF template configured"
+            )
+
+        print(f"✅ Found custom form template: {custom_form['form_name']}")
+
+        # Convert flat form_data (dot notation) to nested structure for PDF generator
+        # PDF generator expects: {"section": {"field": "value"}}
+        # But form_data has: {"section.field": "value"}
+        nested_form_data = {}
+        for key, value in form_data.items():
+            if '.' in key:
+                parts = key.split('.', 1)  # Split only on first dot
+                section, field = parts[0], parts[1]
+
+                if section not in nested_form_data:
+                    nested_form_data[section] = {}
+
+                nested_form_data[section][field] = value
+            else:
+                # Top-level field (no section)
+                nested_form_data[key] = value
+
+        print(f"📊 Converted {len(form_data)} flat fields to {len(nested_form_data)} sections")
+
+        # Import PDF generator (same as used for form extraction PDF preview)
+        from pdf_generator import generate_custom_form_pdf
+
+        # Generate PDF with actual form data
+        print(f"📄 Generating PDF for form type: {form_type}")
+        pdf_buffer = generate_custom_form_pdf(
+            form_data=nested_form_data,  # Use nested structure
+            pdf_template=pdf_template,
+            form_name=custom_form['form_name'],
+            specialty=specialty,
+            patient=patient,
+            doctor_info=doctor_info,
+            form_schema=custom_form.get('form_schema'),  # Pass schema for table rendering
+            # Optional custom colors (None = default Aneya colors)
+            # In future, could fetch from doctor preferences
+            primary_color=None,
+            accent_color=None,
+            text_color=None,
+            light_gray_color=None
+        )
+
+        # Create safe filename
+        patient_name = patient['name'].replace(' ', '_').replace('/', '_')
+        filename = f"consultation_{form_type}_{patient_name}_{appointment_id[:8]}.pdf"
+
+        print(f"✅ PDF generated successfully: {filename}")
+
+        # Return as streaming response
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating PDF: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
+
+
 # ============================================================================
 # SYMPTOM STRUCTURING ENDPOINT
 # ============================================================================
@@ -3969,6 +4346,7 @@ class ExtractFormFieldsRequest(BaseModel):
     patient_context: dict
     current_form_state: dict
     chunk_index: int
+    appointment_id: Optional[str] = None  # For excluding current appointment from historical aggregation
 
 
 class ExtractFormFieldsResponse(BaseModel):
@@ -4010,12 +4388,67 @@ async def determine_consultation_type(request: DetermineConsultationTypeRequest)
     This helps auto-select the correct consultation form based on the conversation content,
     especially for specialists who handle multiple types of consultations (e.g., OBGyn doctors
     seeing general gynecology, infertility, or antenatal patients).
+
+    Now fetches available form types dynamically from the database.
     """
     try:
         import time
         start_time = time.time()
 
         print(f"🔍 Determining consultation type for {request.doctor_specialty} doctor")
+
+        # Try to fetch forms from database, fallback to hardcoded list if Supabase unavailable
+        available_forms = []
+        try:
+            supabase = get_supabase_client()
+
+            # Fetch available forms from database based on doctor specialty
+            specialty_mapping = {
+                'obgyn': 'obstetrics_gynecology',
+                'cardiology': 'cardiology',
+                'general': None  # All forms
+            }
+            db_specialty = specialty_mapping.get(request.doctor_specialty, request.doctor_specialty)
+
+            # Query forms from database
+            if db_specialty:
+                forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').eq('specialty', db_specialty).execute()
+            else:
+                forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
+
+            available_forms = forms_response.data if forms_response.data else []
+
+            if not available_forms:
+                print(f"⚠️  No forms found for specialty {db_specialty}, fetching all active forms")
+                forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
+                available_forms = forms_response.data if forms_response.data else []
+        except Exception as db_error:
+            print(f"❌ Could not fetch forms from database: {db_error}")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Database unavailable: {str(db_error)}"
+            )
+
+        print(f"📋 Found {len(available_forms)} available forms: {[f['form_name'] for f in available_forms]}")
+
+        # If only one form available, return it directly
+        if len(available_forms) == 1:
+            form = available_forms[0]
+            print(f"✅ Only one form available, auto-selecting: {form['form_name']}")
+            return DetermineConsultationTypeResponse(
+                consultation_type=form['form_name'],
+                confidence=1.0,
+                reasoning=f"Only one form available for this specialty: {form['form_name']}"
+            )
+
+        # If no forms available, return error
+        if not available_forms:
+            print(f"❌ No forms available for specialty {request.doctor_specialty}")
+            return DetermineConsultationTypeResponse(
+                consultation_type='unknown',
+                confidence=0.0,
+                reasoning="No forms configured for this specialty"
+            )
 
         # Build conversation text
         conversation_lines = []
@@ -4027,42 +4460,44 @@ async def determine_consultation_type(request: DetermineConsultationTypeRequest)
 
         conversation_text = "\n".join(conversation_lines)
 
-        # Build prompt for Claude
-        system_prompt = """You are a medical consultation classifier for OB/GYN doctors. Analyze the conversation and determine which type of OB/GYN consultation this is.
+        # Build dynamic form options for the prompt
+        form_options = []
+        form_names = []
+        for i, form in enumerate(available_forms, 1):
+            form_name = form['form_name']
+            description = form.get('description') or f"Form for {form_name} consultations"
+            form_options.append(f"{i}. **{form_name}**: {description}")
+            form_names.append(form_name)
 
-You MUST classify as ONE of these three types ONLY:
+        form_options_text = "\n\n".join(form_options)
+        valid_types = ", ".join(form_names)
 
-1. **antenatal**: Pregnancy-related care
-   - Indicators: "pregnant", "weeks pregnant", "fetal", "prenatal", "pregnancy test positive", "ultrasound", "antenatal", "baby", "delivery", "due date", "trimester", "expecting"
-   - Examples: prenatal visits, pregnancy complications, fetal monitoring, obstetric care
+        # Build prompt for Claude with dynamic form options
+        system_prompt = f"""You are a medical consultation classifier. Analyze the conversation and determine which type of consultation form should be used.
 
-2. **infertility**: Fertility issues and reproductive challenges
-   - Indicators: "trying to conceive", "can't get pregnant", "difficulty conceiving", "fertility", "IVF", "IUI", "ovulation", "infertility treatment", "not conceiving", "assisted reproduction", "trying for baby"
-   - Examples: difficulty getting pregnant, fertility workup, assisted reproductive technology
+You MUST classify as ONE of these form types ONLY:
 
-3. **obgyn**: General gynecology (DEFAULT if not clearly antenatal or infertility)
-   - Indicators: "irregular periods", "contraception", "menstrual", "pap smear", "pelvic exam", "gynecological", "bleeding", "discharge", "pain", "fibroids", "PCOS", "birth control"
-   - Examples: menstrual issues, contraception counseling, gynecological exams, routine screening
+{form_options_text}
 
 CLASSIFICATION RULES:
-- If conversation mentions CURRENT PREGNANCY → MUST be "antenatal"
-- If about TRYING TO GET PREGNANT or fertility problems → "infertility"
-- If general gynecological issues or uncertain → "obgyn" (default)
-- NEVER return any value other than: antenatal, infertility, or obgyn
+- Carefully read the conversation and match it to the most appropriate form based on the descriptions above
+- Consider key medical terms, symptoms, and the nature of the consultation
+- If uncertain between multiple options, choose the most specific match
+- You MUST return one of these exact form names: {valid_types}
 
 Return JSON:
-{
-  "consultation_type": "antenatal|infertility|obgyn",
+{{
+  "consultation_type": "<one of: {valid_types}>",
   "confidence": 0.0-1.0,
-  "reasoning": "Brief explanation of classification based on conversation keywords"
-}"""
+  "reasoning": "Brief explanation of classification based on conversation content"
+}}"""
 
         user_prompt = f"""Doctor Specialty: {request.doctor_specialty}
 
 Conversation:
 {conversation_text}
 
-Classify this consultation:"""
+Classify this consultation into one of: {valid_types}"""
 
         # Create local Anthropic client for Claude API calls
         import anthropic
@@ -4090,22 +4525,35 @@ Classify this consultation:"""
         except json.JSONDecodeError as e:
             print(f"⚠️  Failed to parse Claude response: {e}")
             print(f"Response: {response_text}")
-            # Fallback to default obgyn for OBGyn doctors
+            # Fallback to first available form
+            default_form = form_names[0] if form_names else 'unknown'
             return DetermineConsultationTypeResponse(
-                consultation_type='obgyn',
+                consultation_type=default_form,
                 confidence=0.5,
-                reasoning="Failed to parse AI response, defaulting to general obgyn consultation"
+                reasoning=f"Failed to parse AI response, defaulting to {default_form}"
             )
 
-        consultation_type = result.get('consultation_type', 'obgyn')
+        consultation_type = result.get('consultation_type', form_names[0] if form_names else 'unknown')
         confidence = result.get('confidence', 0.0)
         reasoning = result.get('reasoning', '')
 
-        # Validate that the type is one of the allowed three
-        if consultation_type not in ['antenatal', 'infertility', 'obgyn']:
-            print(f"⚠️  Invalid consultation type '{consultation_type}', defaulting to 'obgyn'")
-            consultation_type = 'obgyn'
-            confidence = max(0.3, confidence * 0.5)  # Reduce confidence for invalid response
+        # Validate that the type is one of the available forms
+        if consultation_type not in form_names:
+            print(f"⚠️  Invalid consultation type '{consultation_type}', not in available forms: {form_names}")
+            # Try to find a close match
+            consultation_type_lower = consultation_type.lower()
+            matched = False
+            for form_name in form_names:
+                if form_name.lower() in consultation_type_lower or consultation_type_lower in form_name.lower():
+                    print(f"   Found partial match: {consultation_type} → {form_name}")
+                    consultation_type = form_name
+                    matched = True
+                    break
+
+            if not matched:
+                consultation_type = form_names[0]
+                confidence = max(0.3, confidence * 0.5)  # Reduce confidence for invalid response
+                print(f"   No match found, defaulting to: {consultation_type}")
 
         processing_time = int((time.time() - start_time) * 1000)
         print(f"✅ Consultation type: {consultation_type} (confidence: {confidence:.2f}) in {processing_time}ms")
@@ -4121,11 +4569,11 @@ Classify this consultation:"""
         print(f"❌ Error determining consultation type: {str(e)}")
         import traceback
         traceback.print_exc()
-        # Fallback to default obgyn consultation type
+        # Fallback to first available form or 'unknown'
         return DetermineConsultationTypeResponse(
-            consultation_type='obgyn',
+            consultation_type='unknown',
             confidence=0.3,
-            reasoning=f"Error occurred, defaulting to general obgyn consultation: {str(e)}"
+            reasoning=f"Error occurred during classification: {str(e)}"
         )
 
 
@@ -4146,11 +4594,15 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
 
         print(f"📋 Extracting fields for {request.form_type} form (chunk #{request.chunk_index})")
 
-        # Validate form type
-        if request.form_type not in ['obgyn', 'infertility', 'antenatal']:
+        # Validate form type against database - check if form exists
+        form_check = supabase.table('custom_forms').select('form_name').eq('form_name', request.form_type).eq('status', 'active').execute()
+        if not form_check.data:
+            # Get list of valid forms for error message
+            valid_forms = supabase.table('custom_forms').select('form_name').eq('status', 'active').execute()
+            valid_names = [f['form_name'] for f in (valid_forms.data or [])]
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid form type: {request.form_type}. Expected one of: obgyn, infertility, antenatal"
+                detail=f"Invalid form type: {request.form_type}. Expected one of: {', '.join(valid_names)}"
             )
 
         # Process ALL segments (both doctor and patient)
@@ -4181,12 +4633,63 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
 
         conversation_text = "\n".join(conversation_lines)
 
-        # ✨ NEW: Fetch schema from database
-        schema = get_form_schema_from_db(request.form_type)
+        # ✨ NEW: Fetch schema and table_metadata from database
+        schema_data = get_form_schema_from_db(request.form_type, full_metadata=True)
+        schema = schema_data.get('schema', schema_data)  # Handle both formats
+        table_metadata = schema_data.get('table_metadata', {})
         print(f"📊 Using schema from database for {request.form_type}")
+        print(f"📊 Table metadata: {len(table_metadata.get('tables', {}) if isinstance(table_metadata, dict) else 0)} tables classified")
 
-        # Get schema hints from database schema
-        schema_hints = build_extraction_prompt_hints_from_schema(schema)
+        # ✨ NEW: Flatten schema for LLM extraction
+        flattened_schema, field_mapping = flatten_schema_for_extraction(schema)
+        schema_hints = build_extraction_prompt_hints_from_flattened_schema(flattened_schema)
+
+        print(f"📊 Flattened {len(flattened_schema)} fields for extraction")
+        print(f"   Field mapping has {len(field_mapping)} entries")
+
+        # Build patient context section for the prompt
+        patient_context_text = ""
+        if request.patient_context:
+            demographics = request.patient_context.get('demographics', {})
+            medications = request.patient_context.get('medications', [])
+            conditions = request.patient_context.get('conditions', [])
+            allergies = request.patient_context.get('allergies', [])
+
+            # Build patient profile summary
+            patient_parts = []
+            if demographics.get('name'):
+                patient_parts.append(f"Name: {demographics['name']}")
+            if demographics.get('age_years'):
+                patient_parts.append(f"Age: {demographics['age_years']} years")
+            if demographics.get('sex'):
+                patient_parts.append(f"Sex: {demographics['sex']}")
+
+            if patient_parts:
+                patient_context_text = f"\n\nPatient Profile:\n{', '.join(patient_parts)}"
+
+            # Add medications if any
+            if medications:
+                meds_text = "\n".join([
+                    f"- {med['name']}" + (f" ({med['dosage']})" if med.get('dosage') else "")
+                    for med in medications[:5]  # Limit to 5 most relevant
+                ])
+                patient_context_text += f"\n\nCurrent Medications:\n{meds_text}"
+
+            # Add conditions if any
+            if conditions:
+                conds_text = "\n".join([
+                    f"- {cond['name']}" + (f" ({cond['status']})" if cond.get('status') else "")
+                    for cond in conditions[:5]  # Limit to 5 most relevant
+                ])
+                patient_context_text += f"\n\nMedical History:\n{conds_text}"
+
+            # Add allergies if any (critical for safety)
+            if allergies:
+                allergies_text = "\n".join([
+                    f"- {allergy['allergen']}" + (f" ({allergy.get('severity', 'unknown')} severity)" if allergy.get('severity') else "")
+                    for allergy in allergies
+                ])
+                patient_context_text += f"\n\nAllergies:\n{allergies_text}"
 
         # Build Claude prompt for extraction
         system_prompt = f"""You are a medical data extraction specialist. Your task is to extract structured clinical data from a doctor-patient consultation dialogue.
@@ -4194,6 +4697,7 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
 Extract information from BOTH doctor and patient statements. Patient responses often contain critical medical information (e.g., previous pregnancies, symptoms, medical history).
 
 Extract ONLY information explicitly stated in the conversation. Do NOT infer, guess, or make assumptions.
+{patient_context_text}
 
 Form Type: {request.form_type.upper()}
 Available Fields:
@@ -4203,15 +4707,18 @@ Rules:
 1. Extract from BOTH doctor questions AND patient answers
 2. Patient responses are the primary source of medical history data
 3. Extract only NEW information not in current_form_state
-4. Use dot notation for nested fields (e.g., "vital_signs.systolic_bp")
+4. Use SIMPLE field names from the Available Fields list above (e.g., "weight", "bp", "fhr" not "vital_signs.systolic_bp")
 5. Convert units where needed (Fahrenheit → Celsius, text → numbers)
 6. Skip extraction if confidence < 0.7
-7. For blood pressure, extract both values if stated together (e.g., "120 over 80")
+7. For blood pressure, use "bp" field with format "120/80"
 8. Return JSON with field_updates and confidence_scores
+9. Use patient context (demographics, medications, conditions, allergies) to validate and contextualize extracted information
 
 Examples:
-- Doctor: "Any previous pregnancies?" → Patient: "Yes, two" → Extract: "obstetric_history.gravida": 2
-- Doctor: "Blood pressure is 120 over 80" → Extract: "vital_signs.systolic_bp": 120, "vital_signs.diastolic_bp": 80
+- Doctor: "Any previous pregnancies?" → Patient: "Yes, two" → Extract: "gravida": 2
+- Doctor: "Blood pressure is 120 over 80" → Extract: "bp": "120/80"
+- Doctor: "Weight is 61 kilos" → Extract: "weight": 61
+- Doctor: "Fetal heart rate is 170" → Extract: "fhr": 170
 - Patient: "I've been bleeding heavily for 3 days" → Extract relevant symptoms
 
 Current Form State (DO NOT extract these fields):
@@ -4276,11 +4783,38 @@ Extract all relevant clinical data as JSON:
         field_updates = extraction_result.get("field_updates", {})
         confidence_scores = extraction_result.get("confidence_scores", {})
 
-        # Filter by confidence (>= 0.7)
-        field_updates = filter_by_confidence(field_updates, confidence_scores, min_confidence=0.7)
+        print(f"📝 LLM extracted {len(field_updates)} fields (flat format)")
+        print(f"   Raw extraction: {field_updates}")
+        print(f"   Confidence scores: {confidence_scores}")
 
-        # Exclude fields already in current form state
-        field_updates = exclude_existing_fields(field_updates, request.current_form_state)
+        # ✨ IMPORTANT: Filter by confidence BEFORE mapping (while field names still match)
+        field_updates = filter_by_confidence(field_updates, confidence_scores, min_confidence=0.7)
+        print(f"📝 After confidence filter: {len(field_updates)} fields (still flat)")
+        print(f"   Remaining: {field_updates}")
+
+        # ✨ NEW: Map flat field names back to nested structure
+        field_updates = map_flat_fields_to_nested(field_updates, field_mapping)
+        print(f"📝 Mapped to {len(field_updates)} nested fields")
+        print(f"   After mapping: {field_updates}")
+
+        # ✨ NEW: Apply historical consultation aggregation for fields marked with requires_previous_consultations
+        # Now also uses table_metadata to identify tables needing historical data aggregation
+        patient_id = request.patient_context.get('demographics', {}).get('patient_id') or request.patient_context.get('patient_id')
+        field_updates = await apply_historical_aggregation(
+            field_updates=field_updates,
+            schema=schema,
+            patient_context=request.patient_context,
+            form_type=request.form_type,
+            patient_id=patient_id,
+            current_appointment_id=request.appointment_id,  # Exclude current appointment from aggregation
+            table_metadata=table_metadata  # Table classification from form upload
+        )
+        print(f"📝 After historical aggregation: {len(field_updates)} fields")
+
+        # Exclude fields already in current form state (smart version that keeps aggregated arrays)
+        field_updates = exclude_existing_fields_smart(field_updates, request.current_form_state)
+        print(f"📝 After smart exclude: {len(field_updates)} fields")
+        print(f"   Remaining: {field_updates}")
 
         # Validate all extracted fields
         valid_updates, validation_errors = validate_multiple_fields(
@@ -4290,6 +4824,9 @@ Extract all relevant clinical data as JSON:
 
         if validation_errors:
             print(f"⚠️  Validation errors: {validation_errors}")
+
+        print(f"📝 After validation: {len(valid_updates)} fields")
+        print(f"   Valid updates: {valid_updates}")
 
         # Filter confidence scores to only validated fields
         validated_confidence = {
@@ -4363,6 +4900,17 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 
         print(f"📊 Detected: {consultation_type} (confidence: {confidence:.2f})")
 
+        # Step 2b: Immediately save detected_consultation_type to consultation record
+        # This ensures the type is saved even if form creation fails
+        try:
+            supabase.table('consultations').update({
+                'detected_consultation_type': consultation_type
+            }).eq('id', request.consultation_id).execute()
+            print(f"✅ Saved detected_consultation_type: {consultation_type}")
+        except Exception as e:
+            print(f"⚠️ Failed to save detected_consultation_type: {e}")
+            # Continue - don't fail the whole request
+
         # Step 3: Check if form exists in unified consultation_forms table
         # ✨ NEW: Using unified table with JSONB storage
         existing_form = supabase.table('consultation_forms').select('id, form_data').eq(
@@ -4413,13 +4961,42 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
                 user_id = '8c55534b-3c7a-436a-bb00-70dc6722439f'
                 print(f"⚠️  Using system default as created_by: {user_id[:8]}...")
 
+            # Fetch appointment to get scheduled date for auto-fill
+            initial_form_data = {}
+            try:
+                appointment_result = supabase.table("appointments")\
+                    .select("scheduled_time")\
+                    .eq("id", request.appointment_id)\
+                    .single()\
+                    .execute()
+
+                if appointment_result.data and 'scheduled_time' in appointment_result.data:
+                    # Extract date from scheduled_time (format: YYYY-MM-DD)
+                    appointment_date = appointment_result.data['scheduled_time'][:10]
+
+                    # Initialize form_data with visit_records containing appointment date
+                    # This matches the antenatal form schema structure
+                    initial_form_data = {
+                        'antenatal_visits': {
+                            'visit_records': [
+                                {
+                                    'visit_date': appointment_date
+                                }
+                            ]
+                        }
+                    }
+                    print(f"📅 Auto-filled visit date: {appointment_date}")
+            except Exception as e:
+                print(f"⚠️  Could not fetch appointment date: {e}")
+                # Continue with empty form_data if appointment fetch fails
+
             # ✨ NEW: Create form in unified consultation_forms table with JSONB
             new_form_data = {
                 'patient_id': request.patient_id,
                 'appointment_id': request.appointment_id,
                 'form_type': consultation_type,
                 'specialty': 'obstetrics_gynecology',  # Based on doctor_specialty
-                'form_data': {},  # Empty JSONB, will be populated by extraction
+                'form_data': initial_form_data,  # Pre-populated with appointment date
                 'status': 'draft',
                 'created_by': user_id,
                 'updated_by': user_id,
@@ -4436,13 +5013,19 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             else:
                 raise Exception("Failed to create form")
 
+        # Step 4b: Fetch comprehensive patient context (filtered by form_type for targeted aggregation)
+        patient_context = fetch_patient_context(request.patient_id, form_type=consultation_type)
+        patient_context['patient_id'] = request.patient_id  # Keep patient_id for backward compatibility
+        patient_context['demographics']['patient_id'] = request.patient_id  # Also add to demographics for aggregation
+
         # Step 5: Extract form fields using existing endpoint function
         extraction_request = ExtractFormFieldsRequest(
             diarized_segments=diarized_segments,
             form_type=consultation_type,
-            patient_context={'patient_id': request.patient_id},
+            patient_context=patient_context,
             current_form_state=current_form_state,
-            chunk_index=0
+            chunk_index=0,
+            appointment_id=request.appointment_id  # Pass appointment_id to exclude from historical aggregation
         )
         extraction_result = await extract_form_fields(extraction_request)
 
@@ -4453,9 +5036,13 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             print(f"🔄 Updating form with {len(field_updates)} fields...")
             print(f"   Fields to update: {list(field_updates.keys())}")
 
-            # ✨ NEW: Merge extracted fields into form_data JSONB
-            # Merge with existing data instead of replacing
-            merged_form_data = {**current_form_state, **field_updates}
+            # ✨ NEW: Deep merge extracted fields into form_data JSONB
+            # Deep merge preserves nested structures and arrays (critical for aggregation)
+            merged_form_data = deep_merge(current_form_state, field_updates)
+            print(f"🔄 Deep merged form data:")
+            print(f"   Current state had {len(current_form_state)} top-level keys")
+            print(f"   Field updates have {len(field_updates)} nested paths")
+            print(f"   Merged result has {len(merged_form_data)} top-level keys")
 
             # Update the form
             user_id = request.patient_snapshot.get('user_id')
@@ -4480,16 +5067,6 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
                 print(f"❌ Error updating form: {str(e)}")
                 # Don't fail the entire request if update fails
                 # The extraction was successful, just log the error
-
-        # Step 6b: Update consultation with detected_consultation_type
-        try:
-            supabase.table('consultations').update({
-                'detected_consultation_type': consultation_type
-            }).eq('id', request.consultation_id).execute()
-            print(f"✅ Updated consultation with detected type: {consultation_type}")
-        except Exception as e:
-            print(f"⚠️ Failed to update consultation detected_consultation_type: {e}")
-            # Don't fail the request if this update fails
 
         # Step 7: Return success
         return AutoFillConsultationFormResponse(
@@ -4541,9 +5118,602 @@ def get_supabase_client():
     return create_client(supabase_url, supabase_key)
 
 
+def fetch_patient_context(patient_id: str, form_type: str = None) -> dict:
+    """
+    Fetch comprehensive patient context for form filling.
+
+    Retrieves:
+    - Demographics (age, sex, name)
+    - Current medications
+    - Medical conditions/history
+    - Allergies
+    - Previous consultation form data (WITH ACTUAL FORM DATA for aggregation)
+
+    Args:
+        patient_id: UUID of the patient
+        form_type: Optional form type to filter historical forms (e.g., 'antenatal')
+
+    Returns:
+        Dictionary containing patient context with keys:
+        - demographics: {age_years, sex, name, date_of_birth, patient_id}
+        - medications: List of current medications
+        - conditions: List of medical conditions
+        - allergies: List of allergies
+        - previous_forms: List of completed forms WITH ACTUAL FORM DATA
+    """
+    try:
+        supabase = get_supabase_client()
+        context = {
+            'demographics': {},
+            'medications': [],
+            'conditions': [],
+            'allergies': [],
+            'previous_forms': []
+        }
+
+        # 1. Fetch basic demographics from patients table
+        patient_result = supabase.table('patients').select(
+            'name, sex, date_of_birth, age_years, height_cm, weight_kg, current_medications, current_conditions, allergies'
+        ).eq('id', patient_id).single().execute()
+
+        if patient_result.data:
+            patient = patient_result.data
+
+            # Calculate age from date_of_birth if available
+            age_years = patient.get('age_years')
+            if not age_years and patient.get('date_of_birth'):
+                from datetime import datetime
+                dob = datetime.fromisoformat(patient['date_of_birth'].replace('Z', '+00:00'))
+                today = datetime.now()
+                age_years = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+            context['demographics'] = {
+                'name': patient.get('name'),
+                'sex': patient.get('sex'),
+                'age_years': age_years,
+                'date_of_birth': patient.get('date_of_birth'),
+                'height_cm': float(patient['height_cm']) if patient.get('height_cm') else None,
+                'weight_kg': float(patient['weight_kg']) if patient.get('weight_kg') else None
+            }
+
+            # Legacy text fields for medications/conditions/allergies
+            if patient.get('current_medications'):
+                context['medications_text'] = patient['current_medications']
+            if patient.get('current_conditions'):
+                context['conditions_text'] = patient['current_conditions']
+            if patient.get('allergies'):
+                context['allergies_text'] = patient['allergies']
+
+        # 2. Fetch active medications from patient_medications table
+        meds_result = supabase.table('patient_medications').select(
+            'medication_name, dosage, frequency, indication, started_date'
+        ).eq('patient_id', patient_id).eq('status', 'active').execute()
+
+        if meds_result.data:
+            context['medications'] = [
+                {
+                    'name': med['medication_name'],
+                    'dosage': med.get('dosage'),
+                    'frequency': med.get('frequency'),
+                    'indication': med.get('indication'),
+                    'started_date': med.get('started_date')
+                }
+                for med in meds_result.data
+            ]
+
+        # 3. Fetch active medical conditions
+        conditions_result = supabase.table('patient_conditions').select(
+            'condition_name, icd10_code, diagnosed_date, status'
+        ).eq('patient_id', patient_id).in_('status', ['active', 'chronic']).execute()
+
+        if conditions_result.data:
+            context['conditions'] = [
+                {
+                    'name': cond['condition_name'],
+                    'icd10_code': cond.get('icd10_code'),
+                    'diagnosed_date': cond.get('diagnosed_date'),
+                    'status': cond.get('status')
+                }
+                for cond in conditions_result.data
+            ]
+
+        # 4. Fetch active allergies
+        allergies_result = supabase.table('patient_allergies').select(
+            'allergen, allergen_category, reaction, severity'
+        ).eq('patient_id', patient_id).eq('status', 'active').execute()
+
+        if allergies_result.data:
+            context['allergies'] = [
+                {
+                    'allergen': allergy['allergen'],
+                    'category': allergy.get('allergen_category'),
+                    'reaction': allergy.get('reaction'),
+                    'severity': allergy.get('severity')
+                }
+                for allergy in allergies_result.data
+            ]
+
+        # 5. Fetch recent consultation forms WITH ACTUAL DATA (last 10 forms, any status)
+        # Note: Include both 'partial' and 'completed' to aggregate ongoing consultations
+        query = supabase.table('consultation_forms').select(
+            'id, form_type, specialty, created_at, form_data, status, appointment_id'
+        ).eq('patient_id', patient_id).in_('status', ['partial', 'completed'])
+
+        # Filter by form_type if specified (for targeted historical aggregation)
+        if form_type:
+            query = query.eq('form_type', form_type)
+            print(f"📋 Filtering previous forms by form_type: {form_type}")
+
+        forms_result = query.order('created_at', desc=True).limit(10).execute()
+
+        if forms_result.data:
+            context['previous_forms'] = [
+                {
+                    'id': form['id'],
+                    'form_type': form['form_type'],
+                    'specialty': form.get('specialty'),
+                    'created_at': form.get('created_at'),
+                    'appointment_id': form.get('appointment_id'),
+                    'form_data': form.get('form_data', {})  # ✅ Include actual data for aggregation!
+                }
+                for form in forms_result.data
+            ]
+            print(f"📋 Fetched {len(context['previous_forms'])} previous forms with data")
+
+        print(f"📋 Fetched patient context: {context['demographics'].get('name')}, "
+              f"{len(context.get('medications', []))} medications, "
+              f"{len(context.get('conditions', []))} conditions, "
+              f"{len(context.get('allergies', []))} allergies")
+
+        return context
+
+    except Exception as e:
+        print(f"⚠️  Error fetching patient context: {e}")
+        # Return empty context rather than failing
+        return {
+            'demographics': {},
+            'medications': [],
+            'conditions': [],
+            'allergies': [],
+            'previous_forms': []
+        }
+
+
+def deep_merge(dict1: dict, dict2: dict) -> dict:
+    """
+    Deep merge two dictionaries, recursively merging nested dicts and arrays.
+
+    Rules:
+    - Scalars in dict2 overwrite dict1
+    - Arrays in dict2 extend (append to) dict1
+    - Nested dicts merge recursively
+
+    Args:
+        dict1: Base dictionary (historical/existing data)
+        dict2: Override dictionary (new/current data)
+
+    Returns:
+        Merged dictionary
+    """
+    result = dict1.copy()
+
+    for key, value in dict2.items():
+        if key in result:
+            existing = result[key]
+
+            # Both are dicts: recurse
+            if isinstance(existing, dict) and isinstance(value, dict):
+                result[key] = deep_merge(existing, value)
+
+            # Both are lists: extend
+            elif isinstance(existing, list) and isinstance(value, list):
+                result[key] = existing + value
+
+            # Otherwise: override
+            else:
+                result[key] = value
+        else:
+            result[key] = value
+
+    return result
+
+
+def extract_historical_field_data(
+    field_schema: dict,
+    previous_forms: list,
+    field_path: str
+) -> list:
+    """
+    Extract historical data for a field marked with requires_previous_consultations.
+
+    Args:
+        field_schema: The field definition with aggregation metadata
+        previous_forms: List of previous consultation form objects
+        field_path: Nested path to the field (e.g., "antenatal_visits.visit_records")
+
+    Returns:
+        List of historical rows (for array fields) or list with single value (for simple fields)
+    """
+    if not field_schema.get('requires_previous_consultations'):
+        return []
+
+    historical_data = []
+
+    # Apply filters
+    filters = field_schema.get('historical_filters', {})
+    filtered_forms = [
+        form for form in previous_forms
+        if all(form.get(k) == v for k, v in filters.items())
+    ]
+
+    print(f"📊 Found {len(filtered_forms)} forms matching filters {filters}")
+
+    # Apply max_historical_records limit
+    max_records = field_schema.get('max_historical_records')
+    if max_records is not None:
+        filtered_forms = filtered_forms[:max_records]
+        print(f"📊 Limited to {max_records} most recent forms")
+
+    # Extract data from each historical form
+    for form in filtered_forms:
+        form_data = form.get('form_data', {})
+
+        # Try two approaches to find the data:
+        # 1. NESTED structure: {"antenatal_visits": {"visit_records": [...]}}
+        # 2. FLAT structure: {"antenatal_visits.visit_records": [...]}
+
+        value = None
+
+        # First try flat structure (direct key lookup)
+        if field_path in form_data:
+            value = form_data[field_path]
+            print(f"   Found data in FLAT structure: {field_path}")
+        else:
+            # Try nested structure (navigate through parts)
+            parts = field_path.split('.')
+            value = form_data
+
+            for part in parts:
+                if isinstance(value, dict) and part in value:
+                    value = value[part]
+                else:
+                    value = None
+                    break
+
+            if value is not None:
+                print(f"   Found data in NESTED structure: {field_path}")
+
+        if value is not None:
+            # For array fields, extend the list
+            if field_schema.get('type') == 'array' and isinstance(value, list):
+                historical_data.extend(value)
+            else:
+                # For simple fields, append single value
+                historical_data.append(value)
+
+    print(f"📊 Extracted {len(historical_data)} historical records for {field_path}")
+    return historical_data
+
+
+def aggregate_field_data(
+    current_data: any,
+    historical_data: list,
+    aggregation_strategy: str
+) -> any:
+    """
+    Merge current data with historical data using specified strategy.
+
+    Args:
+        current_data: Data from current consultation (new row)
+        historical_data: Data from previous consultations
+        aggregation_strategy: 'append' | 'replace' | 'merge'
+
+    Returns:
+        Merged data
+    """
+    if aggregation_strategy == 'replace':
+        # Replace historical with current (rare use case)
+        return current_data
+
+    elif aggregation_strategy == 'append':
+        # Append current to historical (most common for visit tracking)
+        if isinstance(historical_data, list):
+            # Ensure current_data is also a list
+            if isinstance(current_data, list):
+                return historical_data + current_data
+            elif current_data is not None:
+                return historical_data + [current_data]
+            else:
+                return historical_data
+        else:
+            return current_data or historical_data
+
+    elif aggregation_strategy == 'merge':
+        # Deep merge objects (useful for nested data)
+        if isinstance(historical_data, dict) and isinstance(current_data, dict):
+            return deep_merge(historical_data, current_data)
+        else:
+            return current_data or historical_data
+
+    else:
+        print(f"⚠️  Unknown aggregation_strategy: {aggregation_strategy}")
+        return current_data
+
+
+async def apply_historical_aggregation(
+    field_updates: dict,
+    schema: dict,
+    patient_context: dict,
+    form_type: str,
+    patient_id: str = None,
+    current_appointment_id: str = None,
+    table_metadata: dict = None
+) -> dict:
+    """
+    Apply historical consultation aggregation to fields marked with
+    requires_previous_consultations OR identified via table_metadata classification.
+
+    Args:
+        field_updates: Current field updates from LLM extraction {nested_path: value}
+        schema: Full form schema from database
+        patient_context: Patient context (may not have previous_forms yet)
+        form_type: Current form type (e.g., 'antenatal')
+        patient_id: Optional patient ID to fetch previous forms if not in context
+        current_appointment_id: Appointment ID to EXCLUDE from aggregation (avoid duplicates)
+        table_metadata: Table classification metadata from TableClassifier (includes data_source_type)
+
+    Returns:
+        Enhanced field_updates with historical data aggregated
+    """
+    # Fetch previous forms if not already in context
+    previous_forms = patient_context.get('previous_forms', [])
+
+    if not previous_forms:
+        # Try to get patient_id from context if not provided
+        if not patient_id:
+            patient_id = patient_context.get('demographics', {}).get('patient_id')
+
+        if patient_id:
+            print(f"📋 Fetching previous {form_type} forms for aggregation")
+            enhanced_context = fetch_patient_context(patient_id, form_type=form_type)
+            previous_forms = enhanced_context.get('previous_forms', [])
+
+    if not previous_forms:
+        print(f"📋 No previous forms found, skipping aggregation")
+        return field_updates
+
+    # CRITICAL: Exclude forms from the CURRENT appointment to avoid duplicates
+    if current_appointment_id:
+        previous_forms = [
+            form for form in previous_forms
+            if form.get('appointment_id') != current_appointment_id
+        ]
+        print(f"📋 Excluded current appointment ({current_appointment_id}), left with {len(previous_forms)} previous forms")
+
+    if not previous_forms:
+        print(f"📋 No previous forms after excluding current appointment")
+        return field_updates
+
+    print(f"📋 Applying historical aggregation with {len(previous_forms)} previous forms")
+
+    aggregated_updates = {}
+
+    # Iterate through schema to find fields with requires_previous_consultations
+    for section_name, section_def in schema.items():
+        if not isinstance(section_def, dict):
+            continue
+
+        fields = section_def.get('fields', [])
+        if not isinstance(fields, list):
+            continue
+
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+
+            field_name = field.get('name')
+            if not field_name:
+                continue
+
+            # Check if this field requires historical aggregation
+            requires_aggregation = field.get('requires_previous_consultations')
+
+            # ALSO check table_metadata for tables classified as needing historical data
+            if not requires_aggregation and table_metadata:
+                # table_metadata structure: {"tables": {"field_name": {"data_source_type": "...", ...}}}
+                tables_info = table_metadata.get('tables', {}) if isinstance(table_metadata, dict) else {}
+                table_info = tables_info.get(field_name, {})
+                data_source_type = table_info.get('data_source_type')
+
+                # These data_source_types indicate historical data is needed
+                historical_types = [
+                    'visit_history', 'lab_results', 'scan_results',
+                    'medication_history', 'vitals_history', 'vaccination_records'
+                ]
+                if data_source_type in historical_types or table_info.get('references_previous_consultation'):
+                    requires_aggregation = True
+                    print(f"📊 Table '{field_name}' needs aggregation (data_source_type: {data_source_type})")
+
+            if not requires_aggregation:
+                continue
+
+            field_path = f"{section_name}.{field_name}"
+            print(f"📊 Processing aggregation for: {field_path}")
+
+            # Extract historical data
+            historical_data = extract_historical_field_data(
+                field_schema=field,
+                previous_forms=previous_forms,
+                field_path=field_path
+            )
+
+            # Get current data (if any) from field_updates
+            current_data = field_updates.get(field_path)
+
+            # Aggregate using specified strategy
+            aggregation_strategy = field.get('aggregation_strategy', 'append')
+            aggregated_value = aggregate_field_data(
+                current_data=current_data,
+                historical_data=historical_data,
+                aggregation_strategy=aggregation_strategy
+            )
+
+            # Store aggregated result
+            if aggregated_value is not None:
+                aggregated_updates[field_path] = aggregated_value
+                print(f"✅ Aggregated {field_path}: {len(aggregated_value) if isinstance(aggregated_value, list) else 'single value'}")
+
+    # Merge aggregated updates back into field_updates
+    final_updates = {**field_updates, **aggregated_updates}
+
+    print(f"📊 Aggregation complete: {len(aggregated_updates)} fields enhanced")
+    return final_updates
+
+
+def exclude_existing_fields_smart(field_updates: dict, current_form_state: dict) -> dict:
+    """
+    Exclude fields that already have data in current form state.
+
+    ENHANCED: For array fields with aggregated data, DO NOT exclude
+    because we want to show aggregated historical + current data.
+
+    Args:
+        field_updates: Extracted field updates {nested_path: value}
+        current_form_state: Current form data from database
+
+    Returns:
+        Filtered field_updates
+    """
+    filtered = {}
+
+    for field_path, new_value in field_updates.items():
+        # Navigate to existing value
+        parts = field_path.split('.')
+        existing_value = current_form_state
+
+        for part in parts:
+            if isinstance(existing_value, dict) and part in existing_value:
+                existing_value = existing_value[part]
+            else:
+                existing_value = None
+                break
+
+        # Include field if:
+        # 1. No existing value
+        # 2. New value is an array (likely aggregated historical data)
+        # 3. Existing value is different from new value
+
+        if existing_value is None:
+            filtered[field_path] = new_value
+        elif isinstance(new_value, list):
+            # Always include arrays (aggregated data)
+            filtered[field_path] = new_value
+        elif existing_value != new_value:
+            filtered[field_path] = new_value
+        else:
+            print(f"⏭️  Skipping {field_path}: already has value {existing_value}")
+
+    return filtered
+
+
+# @lru_cache(maxsize=32)  # DISABLED: Need fresh data from custom_forms table
+def _get_form_schema_from_db_cached(form_type: str, full_metadata: bool = False) -> dict:
+    """
+    Internal cached function for fetching form schemas from database.
+
+    DO NOT CALL DIRECTLY - use get_form_schema_from_db() instead.
+    This function is cached and returns the same object instance.
+    """
+    try:
+        supabase = get_supabase_client()
+
+        # Query custom_forms table (unified source of truth)
+        # Match by either specialty OR form_name (form_type could be either)
+        print(f"🔍 Querying custom_forms for form_type: {form_type}")
+
+        # Query ALL forms (active and draft) and filter manually
+        result = supabase.table('custom_forms')\
+            .select('form_schema, table_metadata, version, description, specialty, form_name, updated_at, status')\
+            .in_('status', ['active', 'draft'])\
+            .execute()
+
+        print(f"📦 Found {len(result.data) if result.data else 0} forms total")
+
+        # Debug: Show what forms we have
+        if result.data:
+            for i, form in enumerate(result.data):
+                print(f"   Form {i+1}: form_name='{form.get('form_name')}', specialty='{form.get('specialty')}', status='{form.get('status')}'")
+
+        # Filter for matching form_type (by specialty, form_name, or form_name starts with form_type)
+        matching_forms = [
+            form for form in (result.data or [])
+            if (form.get('specialty') == form_type or
+                form.get('form_name') == form_type or
+                form.get('form_name', '').startswith(form_type + '_') or
+                form.get('form_name', '').startswith(form_type))
+        ]
+
+        print(f"📊 Found {len(matching_forms)} forms matching form_type '{form_type}'")
+
+        if not matching_forms:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active forms found for form_type: {form_type}"
+            )
+
+        # Sort by updated_at DESC and take the first (most recent)
+        form_data = sorted(matching_forms, key=lambda x: x.get('updated_at', ''), reverse=True)[0]
+        print(f"✅ Using form: {form_data.get('form_name')} (specialty: {form_data.get('specialty')})")
+
+        # ✅ VALIDATE SCHEMA IS NOT EMPTY
+        form_schema = form_data.get('form_schema')
+        if not form_schema or not isinstance(form_schema, dict):
+            print(f"⚠️  WARNING: Form {form_data.get('form_name')} has invalid schema: {type(form_schema)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Form schema is invalid or empty for {form_type}. Please re-upload the form."
+            )
+
+        schema_keys = list(form_schema.keys()) if isinstance(form_schema, dict) else []
+        if len(schema_keys) == 0:
+            print(f"⚠️  WARNING: Form {form_data.get('form_name')} has empty schema")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Form schema contains no fields for {form_type}. Please re-upload the form."
+            )
+
+        print(f"📊 Schema loaded with {len(schema_keys)} sections/fields")
+
+        if full_metadata:
+            # Return all metadata for frontend
+            return {
+                'schema': form_data['form_schema'],
+                'table_metadata': form_data.get('table_metadata', {}),  # Table classification data
+                'title': form_data.get('description', ''),
+                'description': form_data.get('description', ''),
+                'version': form_data.get('version', 1),
+                'form_type': form_data.get('specialty', ''),
+                'specialty': form_data.get('specialty', ''),
+            }
+        else:
+            # Return only schema definition (for extraction)
+            return form_data['form_schema']
+
+    except Exception as e:
+        print(f"❌ Error fetching schema for {form_type}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch schema from database: {str(e)}"
+        )
+
+
 def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict:
     """
-    Fetch form schema from database instead of Python file.
+    Fetch form schema from database with LRU caching.
+
+    Schemas are cached in memory (max 32 entries) and automatically evicted
+    when the cache is full. Returns a deep copy to prevent cache pollution.
+
     Single source of truth for all form schemas.
 
     Args:
@@ -4552,59 +5722,175 @@ def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict
                       If False, returns only schema_definition (default for backwards compatibility)
 
     Returns:
-        dict: Schema definition or full metadata depending on full_metadata flag
+        dict: Deep copy of schema definition or full metadata depending on full_metadata flag
+
+    Cache Info:
+        - Cache size: 32 entries max
+        - Cache lifetime: Until backend restart
+        - Invalidation: Automatic on backend restart or manual via _get_form_schema_from_db_cached.cache_clear()
     """
-    try:
-        supabase = get_supabase_client()
+    # Return deep copy to prevent callers from mutating the cached object
+    return copy.deepcopy(_get_form_schema_from_db_cached(form_type, full_metadata))
 
-        # Select all relevant fields
-        result = supabase.table('form_schemas')\
-            .select('schema_definition, version, description, form_type, specialty')\
-            .eq('form_type', form_type)\
-            .eq('is_active', True)\
-            .single()\
-            .execute()
 
-        if not result.data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Schema not found for form_type: {form_type}"
-            )
+def flatten_schema_for_extraction(schema: dict) -> tuple[dict, dict]:
+    """
+    Flatten nested schema into simple fields for LLM extraction.
 
-        if full_metadata:
-            # Return all metadata for frontend
-            return {
-                'schema': result.data['schema_definition'],
-                'title': result.data.get('description', ''),  # Use description as title
-                'description': result.data.get('description', ''),
-                'version': result.data.get('version', '1.0'),
-                'form_type': result.data.get('form_type', ''),
-                'specialty': result.data.get('specialty', ''),
-            }
+    Returns:
+        - flattened_schema: Dict of {simple_field_name: field_definition}
+        - field_mapping: Dict of {simple_field_name: nested_field_path}
+    """
+    flattened_schema = {}
+    field_mapping = {}
+
+    for section_name, section_def in schema.items():
+        if not isinstance(section_def, dict):
+            continue
+
+        # NEW: Database schema has fields as ARRAY
+        if 'fields' in section_def and isinstance(section_def['fields'], list):
+            for field in section_def['fields']:
+                if not isinstance(field, dict):
+                    continue
+
+                field_name = field.get('name', '')
+                if not field_name:
+                    continue
+
+                # For array/table fields, flatten the row_fields
+                if field.get('type') == 'array' and field.get('row_fields'):
+                    for row_field in field.get('row_fields', []):
+                        if isinstance(row_field, dict):
+                            row_field_name = row_field.get('name', '')
+                            if row_field_name:
+                                # Create simple field name (e.g., "weight" instead of "antenatal_visits.visit_records.weight")
+                                simple_name = row_field_name
+                                nested_path = f"{section_name}.{field_name}.{row_field_name}"
+
+                                flattened_schema[simple_name] = row_field
+                                field_mapping[simple_name] = nested_path
+
+                                # Also add with prefix for disambiguation (e.g., "visit_weight")
+                                prefixed_name = f"{field_name.replace('_records', '')}_{row_field_name}"
+                                flattened_schema[prefixed_name] = row_field
+                                field_mapping[prefixed_name] = nested_path
+                else:
+                    # Simple field - use field name directly
+                    simple_name = field_name
+                    nested_path = f"{section_name}.{field_name}"
+
+                    flattened_schema[simple_name] = field
+                    field_mapping[simple_name] = nested_path
+
+    return flattened_schema, field_mapping
+
+
+def build_extraction_prompt_hints_from_flattened_schema(flattened_schema: dict) -> str:
+    """
+    Build extraction hints from flattened schema.
+    """
+    hints = []
+
+    for field_name, field_def in flattened_schema.items():
+        field_label = field_def.get('label', field_name)
+        field_type = field_def.get('type', 'string')
+        field_hints = field_def.get('extraction_hints', [])
+
+        hint_parts = [f"- {field_name}"]
+
+        # Add label if different
+        if field_label and field_label != field_name:
+            hint_parts.append(f"({field_label})")
+
+        # Add type
+        hint_parts.append(f"[{field_type}]")
+
+        # Add extraction hints
+        if field_hints:
+            hints_str = ', '.join(field_hints)
+            hint_parts.append(f": {hints_str}")
+
+        hints.append(' '.join(hint_parts))
+
+    return '\n'.join(hints) if hints else "No fields available"
+
+
+def map_flat_fields_to_nested(flat_updates: dict, field_mapping: dict) -> dict:
+    """
+    Convert flat field updates back to nested structure.
+
+    Args:
+        flat_updates: Dict of {simple_field_name: value}
+        field_mapping: Dict of {simple_field_name: nested_field_path}
+
+    Returns:
+        Dict of {nested_path: value}
+    """
+    nested_updates = {}
+
+    for field_name, value in flat_updates.items():
+        # Look up the nested path
+        nested_path = field_mapping.get(field_name)
+
+        if nested_path:
+            # Handle array fields (e.g., antenatal_visits.visit_records.weight)
+            if '..' in nested_path or nested_path.count('.') > 1:
+                # This is a nested array field - wrap in array structure
+                parts = nested_path.split('.')
+                if len(parts) == 3:
+                    section, array_field, row_field = parts
+                    # Create array with single row containing this field
+                    array_path = f"{section}.{array_field}"
+                    if array_path not in nested_updates:
+                        nested_updates[array_path] = [{}]
+                    nested_updates[array_path][0][row_field] = value
+            else:
+                # Simple nested field
+                nested_updates[nested_path] = value
         else:
-            # Return only schema definition (for extraction)
-            return result.data['schema_definition']
+            # No mapping found - use as-is (might be a direct field)
+            nested_updates[field_name] = value
 
-    except Exception as e:
-        print(f"❌ Error fetching schema for {form_type}: {e}")
-        # Fallback to Python file if database fetch fails
-        print(f"⚠️  Falling back to Python schema file")
-        from mcp_servers.form_schemas import get_schema_for_form_type
-        return get_schema_for_form_type(form_type)
+    return nested_updates
 
 
 def build_extraction_prompt_hints_from_schema(schema: dict) -> str:
     """
     Build extraction hints from schema definition.
-    Works with database schemas or Python schemas.
+    DEPRECATED: Use flatten_schema_for_extraction + build_extraction_prompt_hints_from_flattened_schema
     """
     hints = []
 
-    for field_name, field_def in schema.items():
-        if isinstance(field_def, dict) and 'extraction_hints' in field_def:
-            field_hints = field_def['extraction_hints']
-            if field_hints:
-                hints.append(f"- {field_name}: {', '.join(field_hints)}")
+    for section_name, section_def in schema.items():
+        if isinstance(section_def, dict):
+            # NEW: Database schema has fields as ARRAY
+            if 'fields' in section_def and isinstance(section_def['fields'], list):
+                for field in section_def['fields']:
+                    if isinstance(field, dict):
+                        field_name = field.get('name', '')
+                        field_hints = field.get('extraction_hints', [])
+                        field_label = field.get('label', field_name)
+
+                        if field_hints and field_name:
+                            field_path = f"{section_name}.{field_name}"
+                            hints_str = ', '.join(field_hints)
+                            hints.append(f"- {field_path} ({field_label}): {hints_str}")
+
+            # OLD: Python schema has fields as DICT (backwards compatibility)
+            elif 'fields' in section_def and isinstance(section_def['fields'], dict):
+                for field_name, field_def in section_def['fields'].items():
+                    if isinstance(field_def, dict) and 'extraction_hints' in field_def:
+                        field_hints = field_def['extraction_hints']
+                        if field_hints:
+                            field_path = f"{section_name}.{field_name}"
+                            hints.append(f"- {field_path}: {', '.join(field_hints)}")
+
+            # Top-level field with extraction hints (flat schema)
+            elif 'extraction_hints' in section_def:
+                field_hints = section_def['extraction_hints']
+                if field_hints:
+                    hints.append(f"- {section_name}: {', '.join(field_hints)}")
 
     return '\n'.join(hints) if hints else "No specific extraction hints available"
 
@@ -5061,13 +6347,22 @@ async def list_form_schemas():
     try:
         supabase = get_supabase_client()
 
-        result = supabase.table('form_schemas')\
-            .select('id, form_type, specialty, version, description, is_active, updated_at')\
-            .eq('is_active', True)\
+        result = supabase.table('custom_forms')\
+            .select('id, form_name, specialty, version, description, status, updated_at, is_public')\
+            .eq('status', 'active')\
             .execute()
 
         return {
-            "schemas": result.data,
+            "schemas": [{
+                "id": s['id'],
+                "form_type": s['form_name'],  # Map form_name → form_type for compatibility
+                "specialty": s['specialty'],
+                "version": s['version'],
+                "description": s['description'],
+                "is_active": s['status'] == 'active',  # Map status → is_active
+                "is_public": s.get('is_public', False),
+                "updated_at": s['updated_at']
+            } for s in result.data],
             "count": len(result.data)
         }
 
@@ -5076,6 +6371,29 @@ async def list_form_schemas():
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/cache-stats")
+async def get_cache_stats():
+    """
+    Get cache statistics for monitoring schema cache performance.
+
+    Returns hit/miss ratios and cache size information.
+    """
+    cache_info = _get_form_schema_from_db_cached.cache_info()
+    total_requests = cache_info.hits + cache_info.misses
+    hit_rate = cache_info.hits / total_requests if total_requests > 0 else 0
+
+    return {
+        "schema_cache": {
+            "hits": cache_info.hits,
+            "misses": cache_info.misses,
+            "maxsize": cache_info.maxsize,
+            "currsize": cache_info.currsize,
+            "hit_rate": round(hit_rate * 100, 2),
+            "hit_rate_percentage": f"{round(hit_rate * 100, 2)}%"
+        }
+    }
 
 
 # ============================================
