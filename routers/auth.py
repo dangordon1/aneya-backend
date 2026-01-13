@@ -23,14 +23,22 @@ from config import RESEND_API_KEY
 # Initialize router
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
-# Supabase client initialization
+# Supabase client initialization (lazy to avoid breaking tests without env vars)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+_supabase_client: Optional[Client] = None
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise Exception("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+def get_supabase() -> Client:
+    """Get or create Supabase client (lazy initialization)"""
+    global _supabase_client
+    if _supabase_client is None:
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="Supabase not configured. SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required."
+            )
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    return _supabase_client
 
 # Constants
 OTP_LENGTH = 6
@@ -257,11 +265,11 @@ async def send_otp(request: SendOTPRequest):
         expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
         # Check if verification record exists
-        existing = supabase.table('email_verifications').select('*').eq('user_id', user_id).execute()
+        existing = get_supabase().table('email_verifications').select('*').eq('user_id', user_id).execute()
 
         if existing.data and len(existing.data) > 0:
             # Update existing record
-            supabase.table('email_verifications').update({
+            get_supabase().table('email_verifications').update({
                 'otp_hash': otp_hashed,
                 'created_at': now.isoformat(),
                 'expires_at': expires_at.isoformat(),
@@ -273,7 +281,7 @@ async def send_otp(request: SendOTPRequest):
             print(f"✅ Updated existing verification record for {user_id}")
         else:
             # Create new record
-            supabase.table('email_verifications').insert({
+            get_supabase().table('email_verifications').insert({
                 'user_id': user_id,
                 'email': email,
                 'otp_hash': otp_hashed,
@@ -325,7 +333,7 @@ async def verify_otp(request: VerifyOTPRequest):
         print(f"🔐 Verifying OTP for user {user_id}")
 
         # Get verification record
-        result = supabase.table('email_verifications').select('*').eq('user_id', user_id).execute()
+        result = get_supabase().table('email_verifications').select('*').eq('user_id', user_id).execute()
 
         if not result.data or len(result.data) == 0:
             raise HTTPException(status_code=404, detail="No verification request found")
@@ -367,7 +375,7 @@ async def verify_otp(request: VerifyOTPRequest):
             # Check if should lock
             if new_attempts >= MAX_ATTEMPTS:
                 locked_until = now + timedelta(minutes=LOCKOUT_MINUTES)
-                supabase.table('email_verifications').update({
+                get_supabase().table('email_verifications').update({
                     'attempts': new_attempts,
                     'locked_until': locked_until.isoformat()
                 }).eq('user_id', user_id).execute()
@@ -377,7 +385,7 @@ async def verify_otp(request: VerifyOTPRequest):
                     detail=f"Too many failed attempts. Account locked for {LOCKOUT_MINUTES} minutes"
                 )
             else:
-                supabase.table('email_verifications').update({
+                get_supabase().table('email_verifications').update({
                     'attempts': new_attempts
                 }).eq('user_id', user_id).execute()
 
@@ -391,13 +399,13 @@ async def verify_otp(request: VerifyOTPRequest):
         verified_at = now.isoformat()
 
         # Update email_verifications
-        supabase.table('email_verifications').update({
+        get_supabase().table('email_verifications').update({
             'is_verified': True,
             'verified_at': verified_at
         }).eq('user_id', user_id).execute()
 
         # Update user_roles.email_verified
-        supabase.table('user_roles').update({
+        get_supabase().table('user_roles').update({
             'email_verified': True
         }).eq('user_id', user_id).execute()
 
@@ -434,7 +442,7 @@ async def resend_otp(request: ResendOTPRequest):
         print(f"🔄 Resending OTP to {email} for user {user_id}")
 
         # Get verification record
-        result = supabase.table('email_verifications').select('*').eq('user_id', user_id).execute()
+        result = get_supabase().table('email_verifications').select('*').eq('user_id', user_id).execute()
 
         if not result.data or len(result.data) == 0:
             raise HTTPException(status_code=404, detail="No verification request found")
@@ -475,7 +483,7 @@ async def resend_otp(request: ResendOTPRequest):
 
         # Update record
         new_resend_count = record['resend_count'] + 1
-        supabase.table('email_verifications').update({
+        get_supabase().table('email_verifications').update({
             'otp_hash': otp_hashed,
             'created_at': now.isoformat(),
             'expires_at': expires_at.isoformat(),
