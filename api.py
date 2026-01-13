@@ -149,6 +149,10 @@ app.add_middleware(
 from doctor_logo_api import router as doctor_logo_router
 app.include_router(doctor_logo_router)
 
+# Include auth API router (OTP email verification)
+from routers.auth import router as auth_router
+app.include_router(auth_router)
+
 
 class AnalysisRequest(BaseModel):
     """Request body for consultation analysis"""
