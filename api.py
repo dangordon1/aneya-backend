@@ -27,7 +27,7 @@ import time
 import asyncio
 import uuid
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from google.cloud import storage
 from pdf_generator import generate_consultation_pdf
 import firebase_admin
@@ -2899,6 +2899,610 @@ Aneya Healthcare Platform
 
 
 # ============================================================================
+# OTP/EMAIL VERIFICATION ENDPOINTS
+# ============================================================================
+
+class SendOTPRequest(BaseModel):
+    """Request body for sending OTP"""
+    email: str
+    user_id: str
+    name: Optional[str] = None
+    role: str  # 'doctor' or 'patient'
+
+
+class VerifyOTPRequest(BaseModel):
+    """Request body for verifying OTP"""
+    user_id: str
+    otp: str
+
+
+class ResendOTPRequest(BaseModel):
+    """Request body for resending OTP"""
+    user_id: str
+    email: str
+
+
+@app.post("/api/auth/send-otp")
+async def send_otp(request: SendOTPRequest):
+    """
+    Generate and send OTP verification code via email
+
+    Creates a new email verification record with hashed OTP
+    and sends the code via Resend email service.
+    """
+    import resend
+    import hashlib
+    import secrets
+    from datetime import timedelta
+
+    resend_api_key = os.getenv("RESEND_API_KEY")
+    if not resend_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Email service not configured. RESEND_API_KEY is required."
+        )
+
+    resend.api_key = resend_api_key
+
+    try:
+        # Generate 6-digit OTP
+        otp = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+
+        # Hash the OTP for storage (security best practice)
+        otp_hash = hashlib.sha256(otp.encode()).hexdigest()
+
+        # Set expiration (10 minutes from now)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        # Check if there's an existing verification for this user
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=503, detail="Database not configured")
+
+        # Delete any existing unverified records for this user
+        async with httpx.AsyncClient() as http_client:
+            delete_response = await http_client.delete(
+                f"{supabase_url}/rest/v1/email_verifications?user_id=eq.{request.user_id}&is_verified=eq.false",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+
+            # Create new verification record
+            insert_response = await http_client.post(
+                f"{supabase_url}/rest/v1/email_verifications",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=representation"
+                },
+                json={
+                    "user_id": request.user_id,
+                    "email": request.email,
+                    "otp_hash": otp_hash,
+                    "expires_at": expires_at.isoformat(),
+                    "is_verified": False,
+                    "attempts": 0,
+                    "resend_count": 0
+                }
+            )
+
+            if insert_response.status_code not in [200, 201]:
+                error_detail = insert_response.text
+                print(f"❌ Failed to create verification record: {error_detail}")
+                raise HTTPException(status_code=500, detail="Failed to create verification record")
+
+        # Send OTP email
+        greeting = f"Hi {request.name}," if request.name else "Hello,"
+        role_text = "Doctor" if request.role == "doctor" else "Patient"
+
+        html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .container {{
+            background: #f6f5ee;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+        }}
+        .logo {{
+            font-family: Georgia, serif;
+            font-size: 32px;
+            color: #0c3555;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }}
+        .otp-code {{
+            font-size: 42px;
+            font-weight: bold;
+            color: #0c3555;
+            letter-spacing: 8px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 30px 0;
+            border: 2px solid #1d9e99;
+        }}
+        .warning {{
+            background: #fff8e6;
+            border: 1px solid #ffd666;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 14px;
+            color: #8a6d3b;
+            margin-top: 20px;
+        }}
+        .footer {{
+            color: #666;
+            font-size: 14px;
+            margin-top: 30px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">aneya</div>
+        <p style="font-size: 18px; color: #666;">Clinical Decision Support</p>
+
+        <h2 style="color: #0c3555; margin-top: 30px;">Verify Your Email</h2>
+
+        <p>{greeting}</p>
+        <p>Welcome to Aneya! Please use the verification code below to complete your {role_text} Portal registration:</p>
+
+        <div class="otp-code">{otp}</div>
+
+        <p style="font-size: 14px; color: #666;">This code will expire in <strong>10 minutes</strong>.</p>
+
+        <div class="warning">
+            <strong>Security Notice:</strong> Never share this code with anyone. Aneya staff will never ask for your verification code.
+        </div>
+
+        <div class="footer">
+            <p>If you didn't request this code, please ignore this email.</p>
+            <p style="font-size: 12px; color: #999;">
+                Aneya Healthcare Platform<br>
+                This email was sent to {request.email}
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+        text_content = f"""
+Verify Your Email - Aneya
+
+{greeting}
+
+Welcome to Aneya! Please use the verification code below to complete your {role_text} Portal registration:
+
+Verification Code: {otp}
+
+This code will expire in 10 minutes.
+
+Security Notice: Never share this code with anyone. Aneya staff will never ask for your verification code.
+
+If you didn't request this code, please ignore this email.
+
+---
+Aneya Healthcare Platform
+This email was sent to {request.email}
+"""
+
+        # Send via Resend
+        print(f"📧 Sending OTP to {request.email}...")
+
+        params = {
+            "from": "Aneya <noreply@aneya.health>",
+            "to": [request.email],
+            "subject": f"Your Aneya verification code: {otp}",
+            "html": html_content,
+            "text": text_content,
+        }
+
+        email_response = resend.Emails.send(params)
+
+        print(f"✅ OTP email sent to {request.email}")
+        print(f"   Message ID: {email_response.get('id', 'N/A')}")
+        print(f"   OTP Code (for testing): {otp}")
+
+        return {
+            "success": True,
+            "message": "Verification code sent to your email",
+            "expires_in_seconds": 600  # 10 minutes
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ OTP sending error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to send verification code: {str(e)}")
+
+
+@app.post("/api/auth/verify-otp")
+async def verify_otp(request: VerifyOTPRequest):
+    """
+    Verify OTP code and mark email as verified
+
+    Checks the provided OTP against the stored hash and
+    updates user_roles.email_verified to true on success.
+    """
+    import hashlib
+
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=503, detail="Database not configured")
+
+        # Hash the provided OTP
+        otp_hash = hashlib.sha256(request.otp.encode()).hexdigest()
+
+        async with httpx.AsyncClient() as http_client:
+            # Fetch verification record
+            verify_response = await http_client.get(
+                f"{supabase_url}/rest/v1/email_verifications?user_id=eq.{request.user_id}&is_verified=eq.false&select=*",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                }
+            )
+
+            if verify_response.status_code != 200:
+                raise HTTPException(status_code=500, detail="Failed to fetch verification record")
+
+            records = verify_response.json()
+
+            if not records or len(records) == 0:
+                return {
+                    "success": False,
+                    "message": "No verification code found or already verified",
+                    "verified": False
+                }
+
+            record = records[0]
+            record_id = record['id']
+
+            # Check if locked
+            if record.get('locked_until'):
+                locked_until = datetime.fromisoformat(record['locked_until'].replace('Z', '+00:00'))
+                if datetime.now(timezone.utc) < locked_until:
+                    return {
+                        "success": False,
+                        "message": "Too many failed attempts. Please request a new code.",
+                        "verified": False
+                    }
+
+            # Check if expired
+            expires_at = datetime.fromisoformat(record['expires_at'].replace('Z', '+00:00'))
+            if datetime.now(timezone.utc) > expires_at:
+                return {
+                    "success": False,
+                    "message": "Verification code has expired. Please request a new one.",
+                    "verified": False
+                }
+
+            # Check attempts
+            attempts = record.get('attempts', 0)
+            max_attempts = record.get('max_attempts', 5)
+
+            if attempts >= max_attempts:
+                # Lock the record
+                lock_until = datetime.now(timezone.utc) + timedelta(minutes=15)
+                await http_client.patch(
+                    f"{supabase_url}/rest/v1/email_verifications?id=eq.{record_id}",
+                    headers={
+                        "apikey": supabase_key,
+                        "Authorization": f"Bearer {supabase_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={"locked_until": lock_until.isoformat()}
+                )
+
+                return {
+                    "success": False,
+                    "message": "Too many failed attempts. Please request a new code.",
+                    "verified": False
+                }
+
+            # Verify OTP hash
+            if record['otp_hash'] != otp_hash:
+                # Increment attempts
+                await http_client.patch(
+                    f"{supabase_url}/rest/v1/email_verifications?id=eq.{record_id}",
+                    headers={
+                        "apikey": supabase_key,
+                        "Authorization": f"Bearer {supabase_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={"attempts": attempts + 1}
+                )
+
+                remaining = max_attempts - attempts - 1
+                return {
+                    "success": False,
+                    "message": f"Invalid verification code. {remaining} attempts remaining.",
+                    "verified": False
+                }
+
+            # SUCCESS - OTP is valid!
+
+            # Mark verification record as verified
+            await http_client.patch(
+                f"{supabase_url}/rest/v1/email_verifications?id=eq.{record_id}",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "is_verified": True,
+                    "verified_at": datetime.now(timezone.utc).isoformat()
+                }
+            )
+
+            # Update user_roles.email_verified
+            roles_response = await http_client.patch(
+                f"{supabase_url}/rest/v1/user_roles?user_id=eq.{request.user_id}",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json"
+                },
+                json={"email_verified": True}
+            )
+
+            if roles_response.status_code not in [200, 204]:
+                print(f"⚠️ Warning: Failed to update user_roles.email_verified")
+
+            print(f"✅ Email verified for user: {request.user_id}")
+
+            return {
+                "success": True,
+                "message": "Email verified successfully!",
+                "verified": True
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ OTP verification error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
+
+
+@app.post("/api/auth/resend-otp")
+async def resend_otp(request: ResendOTPRequest):
+    """
+    Resend OTP verification code
+
+    Generates a new OTP and updates the verification record.
+    Tracks resend count to prevent abuse.
+    """
+    import resend
+    import hashlib
+    import secrets
+    from datetime import timedelta
+
+    resend_api_key = os.getenv("RESEND_API_KEY")
+    if not resend_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Email service not configured. RESEND_API_KEY is required."
+        )
+
+    resend.api_key = resend_api_key
+
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+        if not supabase_url or not supabase_key:
+            raise HTTPException(status_code=503, detail="Database not configured")
+
+        async with httpx.AsyncClient() as http_client:
+            # Fetch existing verification record
+            verify_response = await http_client.get(
+                f"{supabase_url}/rest/v1/email_verifications?user_id=eq.{request.user_id}&is_verified=eq.false&select=*",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                }
+            )
+
+            if verify_response.status_code != 200:
+                raise HTTPException(status_code=500, detail="Failed to fetch verification record")
+
+            records = verify_response.json()
+
+            if not records or len(records) == 0:
+                raise HTTPException(status_code=404, detail="No pending verification found")
+
+            record = records[0]
+            record_id = record['id']
+            resend_count = record.get('resend_count', 0)
+            last_resent_at = record.get('last_resent_at')
+
+            # Rate limiting: max 5 resends, and must wait 60 seconds between resends
+            if resend_count >= 5:
+                return {
+                    "success": False,
+                    "message": "Maximum resend attempts reached. Please try again later.",
+                    "expires_in_seconds": 0,
+                    "resend_count": resend_count
+                }
+
+            if last_resent_at:
+                last_resent = datetime.fromisoformat(last_resent_at.replace('Z', '+00:00'))
+                time_since_last = (datetime.now(timezone.utc) - last_resent).total_seconds()
+                if time_since_last < 60:
+                    wait_time = int(60 - time_since_last)
+                    return {
+                        "success": False,
+                        "message": f"Please wait {wait_time} seconds before requesting a new code.",
+                        "expires_in_seconds": 0,
+                        "resend_count": resend_count
+                    }
+
+            # Generate new OTP
+            otp = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
+            otp_hash = hashlib.sha256(otp.encode()).hexdigest()
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+            # Update verification record
+            await http_client.patch(
+                f"{supabase_url}/rest/v1/email_verifications?id=eq.{record_id}",
+                headers={
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "otp_hash": otp_hash,
+                    "expires_at": expires_at.isoformat(),
+                    "attempts": 0,  # Reset attempts
+                    "resend_count": resend_count + 1,
+                    "last_resent_at": datetime.now(timezone.utc).isoformat(),
+                    "locked_until": None  # Clear any lock
+                }
+            )
+
+            # Send OTP email (reuse similar template)
+            html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .container {{
+            background: #f6f5ee;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+        }}
+        .logo {{
+            font-family: Georgia, serif;
+            font-size: 32px;
+            color: #0c3555;
+            font-weight: bold;
+            margin-bottom: 20px;
+        }}
+        .otp-code {{
+            font-size: 42px;
+            font-weight: bold;
+            color: #0c3555;
+            letter-spacing: 8px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 30px 0;
+            border: 2px solid #1d9e99;
+        }}
+        .footer {{
+            color: #666;
+            font-size: 14px;
+            margin-top: 30px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">aneya</div>
+        <p style="font-size: 18px; color: #666;">Clinical Decision Support</p>
+
+        <h2 style="color: #0c3555; margin-top: 30px;">Your New Verification Code</h2>
+
+        <p>Here's your new verification code:</p>
+
+        <div class="otp-code">{otp}</div>
+
+        <p style="font-size: 14px; color: #666;">This code will expire in <strong>10 minutes</strong>.</p>
+
+        <div class="footer">
+            <p style="font-size: 12px; color: #999;">
+                Aneya Healthcare Platform<br>
+                This email was sent to {request.email}
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+            text_content = f"""
+Your New Verification Code - Aneya
+
+Here's your new verification code:
+
+{otp}
+
+This code will expire in 10 minutes.
+
+---
+Aneya Healthcare Platform
+This email was sent to {request.email}
+"""
+
+            # Send via Resend
+            print(f"📧 Resending OTP to {request.email}...")
+
+            params = {
+                "from": "Aneya <noreply@aneya.health>",
+                "to": [request.email],
+                "subject": f"Your new Aneya verification code: {otp}",
+                "html": html_content,
+                "text": text_content,
+            }
+
+            email_response = resend.Emails.send(params)
+
+            print(f"✅ OTP resent to {request.email}")
+            print(f"   Message ID: {email_response.get('id', 'N/A')}")
+            print(f"   OTP Code (for testing): {otp}")
+
+            return {
+                "success": True,
+                "message": "New verification code sent",
+                "expires_in_seconds": 600,
+                "resend_count": resend_count + 1
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ OTP resend error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to resend verification code: {str(e)}")
+
+
+# ============================================================================
 # APPOINTMENTS ENDPOINTS
 # ============================================================================
 
@@ -3082,6 +3686,22 @@ async def download_consultation_pdf(appointment_id: str):
 
         # Import PDF generator (same as used for form extraction PDF preview)
         from pdf_generator import generate_custom_form_pdf
+        from models.design_tokens import DesignTokens
+
+        # Load clinic-specific design tokens (colors from database, falls back to Aneya defaults)
+        tokens = None
+        if appointment.get('doctor') and appointment['doctor'].get('id'):
+            doctor_id = appointment['doctor']['id']
+            print(f"🎨 Loading design tokens for clinic: {doctor_id}")
+            try:
+                tokens = await DesignTokens.from_clinic(doctor_id)
+                print(f"✅ Design tokens loaded successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to load design tokens, using defaults: {e}")
+                tokens = DesignTokens.default()
+        else:
+            print(f"ℹ️  No doctor ID found, using default Aneya design tokens")
+            tokens = DesignTokens.default()
 
         # Generate PDF with actual form data
         print(f"📄 Generating PDF for form type: {form_type}")
@@ -3093,12 +3713,7 @@ async def download_consultation_pdf(appointment_id: str):
             patient=patient,
             doctor_info=doctor_info,
             form_schema=custom_form.get('form_schema'),  # Pass schema for table rendering
-            # Optional custom colors (None = default Aneya colors)
-            # In future, could fetch from doctor preferences
-            primary_color=None,
-            accent_color=None,
-            text_color=None,
-            light_gray_color=None
+            tokens=tokens  # Pass clinic-specific design tokens
         )
 
         # Create safe filename
@@ -6476,6 +7091,121 @@ async def update_consultation_form(form_id: str, form_data: dict):
 
     except Exception as e:
         print(f"❌ Error updating form: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Clinic Color Scheme Management ====================
+
+@app.get("/api/clinics/{doctor_id}/color-scheme")
+async def get_clinic_color_scheme(doctor_id: str):
+    """
+    Get the custom color scheme for a clinic.
+
+    Args:
+        doctor_id: Doctor/clinic ID
+
+    Returns:
+        Color scheme or null if none set (falls back to Aneya defaults)
+    """
+    try:
+        supabase = get_supabase_client()
+
+        result = supabase.table("clinic_color_schemes")\
+            .select("*")\
+            .eq("doctor_id", doctor_id)\
+            .single()\
+            .execute()
+
+        if result.data:
+            return {"color_scheme": result.data}
+        else:
+            return {"color_scheme": None, "message": "No custom color scheme set, using Aneya defaults"}
+
+    except Exception as e:
+        # If no scheme found, return null (will use defaults)
+        if "matching row" in str(e).lower():
+            return {"color_scheme": None, "message": "No custom color scheme set, using Aneya defaults"}
+        print(f"❌ Error fetching color scheme: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/clinics/{doctor_id}/color-scheme")
+async def create_or_update_clinic_color_scheme(
+    doctor_id: str,
+    primary_color: str = Body(...),
+    accent_color: str = Body(...),
+    text_color: str = Body(...),
+    text_light_color: str = Body(...),
+    background_light_color: str = Body(...),
+    background_white_color: str = Body("#ffffff")
+):
+    """
+    Create or update the custom color scheme for a clinic.
+
+    All colors should be in hex format (e.g., "#0c3555").
+
+    Args:
+        doctor_id: Doctor/clinic ID
+        primary_color: Primary brand color
+        accent_color: Accent color for highlights
+        text_color: Body text color
+        text_light_color: Light text/borders color
+        background_light_color: Subtle background color
+        background_white_color: White background color
+
+    Returns:
+        Created/updated color scheme
+    """
+    try:
+        supabase = get_supabase_client()
+
+        color_scheme_data = {
+            "doctor_id": doctor_id,
+            "primary_color": primary_color,
+            "accent_color": accent_color,
+            "text_color": text_color,
+            "text_light_color": text_light_color,
+            "background_light_color": background_light_color,
+            "background_white_color": background_white_color
+        }
+
+        # Try to update existing, or insert if not exists
+        result = supabase.table("clinic_color_schemes")\
+            .upsert(color_scheme_data, on_conflict="doctor_id")\
+            .execute()
+
+        print(f"✅ Color scheme saved for clinic: {doctor_id}")
+        return {"color_scheme": result.data[0], "message": "Color scheme saved successfully"}
+
+    except Exception as e:
+        print(f"❌ Error saving color scheme: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/clinics/{doctor_id}/color-scheme")
+async def delete_clinic_color_scheme(doctor_id: str):
+    """
+    Delete the custom color scheme for a clinic (reverts to Aneya defaults).
+
+    Args:
+        doctor_id: Doctor/clinic ID
+
+    Returns:
+        Success message
+    """
+    try:
+        supabase = get_supabase_client()
+
+        result = supabase.table("clinic_color_schemes")\
+            .delete()\
+            .eq("doctor_id", doctor_id)\
+            .execute()
+
+        print(f"✅ Color scheme deleted for clinic: {doctor_id}")
+        return {"message": "Color scheme deleted, will use Aneya defaults"}
+
+    except Exception as e:
+        print(f"❌ Error deleting color scheme: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
