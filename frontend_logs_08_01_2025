@@ -1,0 +1,55 @@
+08:04
+"🔄 Loading doctor profile for role: doctor"
+08:05
+"✅ User authenticated:" "dkasturiv@rediffmail.com"
+08:05
+"📝 Setting doctorProfile to:" {"id":"4baef626-bd28-4f22-ac5c-68e304e16159","name":"Dr. Kasturi Donimath"}
+08:05
+"✅ Doctor profile loaded:" {"id":"4baef626-bd28-4f22-ac5c-68e304e16159","name":"Dr. Kasturi Donimath","user_id":"Ua3MKU1uoHVOwOhfuS84TykJaRk2"}
+08:05
+"📧 Email verified:" true
+08:05
+"🔔 doctorProfile state changed:" {"id":"4baef626-bd28-4f22-ac5c-68e304e16159","name":"Dr. Kasturi Donimath"}
+08:05
+"🔍 useAppointments: Fetched appointments with doctor data:" []
+08:05
+"⏱️ Active appointments query: 265ms (0 records)"
+08:06
+"🔍 Fetching past appointments for user:" "Ua3MKU1uoHVOwOhfuS84TykJaRk2" "(own appointments only)"
+08:06
+"⏱️ Past appointments query: 382ms"
+08:06
+"📋 Past appointments found:" 10 [{"id":"8020cc76-4ebb-40c1-bd9c-95d95b0b93ad","created_at":"2025-12-29T07:50:53.146546+00:00","updated_at":"2025-12-29T07:58:27.002629+00:00","patient_id":"99cb75af-16ed-444a-86d4-d4ebf37d4647","scheduled_time":"2025-12-29T03:30:00+00:00","duration_minutes":15,"status":"completed","appointment_type":"obgyn_general_obgyn","reason":"","notes":"","consultation_id":"7600e1eb-c053-40f1-9367-36e5e53ff40f","created_by":"Ua3MKU1uoHVOwOhfuS84TykJaRk2","cancelled_at":null,"cancellation_reason":null,"doctor_id":"4baef626-bd28-4f22-ac5c-68e304e16159","booked_by":null,"specialty":"obgyn","specialty_subtype":"general_obgyn","patient":{"id":"99cb75af-16ed-444a-86d4-d4ebf37d4647","sex":"Female","name":"juliet bangari","email":"juliet@aneya.com","phone":"","user_id":null,"archived":false,"age_years":null,"allergies":"","height_cm":null,"weight_kg":null,"created_at":"2025-12-29T07:50:40.756656+00:00","created_by":"Ua3MKU1uoHVOwOhfuS84TykJaRk2","updated_at":"2025-12-29T07:50:40.756656+00:00","date_of_birth":"1989-06-06","current_conditions":"","current_medications":"","consultation_language":"en-IN","migrated_to_shared_health_record":false}},{"id":"d167b65b-39eb-4a05-ae66-ef093be3d8a6","created_at":"2025-12-29T07:05:33.653279+00:00","updated_at":"2025-12-29T07:09:18.070071+00:00","patient_id":"2c287b52-9f4d-495d-8831-daa4331978b6","scheduled_time":"2025-12-29T03:30:00+00:00","duration_minutes":15,"status":"completed","appointment_type":"obgyn_general_obgyn","reason":"","notes":"","consultation_id":"188da78a-dfa5-45dc-9681-b11a33bdd436","created_by":"Ua3MKU1uoHVOwOhfuS84TykJaRk2","cancelled_at":null,"cancellation_reason":null,"doctor_id":"4baef626-bd28-4f22-ac5c-68e304e16159","booked_by":null,"specialty":"obgyn","specialty_subtype":"general_obgyn","patient":{"id":"2c287b52-9f4d-495d-8831-daa4331978b6","sex":"Female","name":"Madhuri kulkarni","email":"Madhuri_kulkarni@aneya.com","phone":"","user_id":null,"archived":false,"age_years":null,"allergies":"","height_cm":null,"weight_kg":null,...[truncated]
+08:06
+"⏱️ Consultations query: 353ms"
+5m 12s of inactivity
+15:02
+"⏱️ Auth state check: 659ms"
+15:02
+"👑 User role:" "doctor"
+15:02
+"🔍 loadDoctorProfile called with userId:" "Ua3MKU1uoHVOwOhfuS84TykJaRk2"
+15:02
+"🔄 Loading doctor profile for role: doctor"
+15:02
+"📝 Setting doctorProfile to:" {"id":"4baef626-bd28-4f22-ac5c-68e304e16159","name":"Dr. Kasturi Donimath"}
+15:02
+"✅ Doctor profile loaded:" {"id":"4baef626-bd28-4f22-ac5c-68e304e16159","name":"Dr. Kasturi Donimath","user_id":"Ua3MKU1uoHVOwOhfuS84TykJaRk2"}
+15:02
+"📧 Email verified:" true
+15:02
+"✅ User authenticated:" "dkasturiv@rediffmail.com"
+15:03
+"🔔 doctorProfile state changed:" {"id":"4baef626-bd28-4f22-ac5c-68e304e16159","name":"Dr. Kasturi Donimath"}
+15:03
+"⏱️ Active appointments query: 237ms (0 records)"
+15:03
+"🔍 useAppointments: Fetched appointments with doctor data:" []
+15:03
+"🔍 Fetching past appointments for user:" "Ua3MKU1uoHVOwOhfuS84TykJaRk2" "(own appointments only)"
+15:04
+"⏱️ Past appointments query: 214ms"
+15:04
+"📋 Past appointments found:" 10 [{"id":"8020cc76-4ebb-40c1-bd9c-95d95b0b93ad","created_at":"2025-12-29T07:50:53.146546+00:00","updated_at":"2025-12-29T07:58:27.002629+00:00","patient_id":"99cb75af-16ed-444a-86d4-d4ebf37d4647","scheduled_time":"2025-12-29T03:30:00+00:00","duration_minutes":15,"status":"completed","appointment_type":"obgyn_general_obgyn","reason":"","notes":"","consultation_id":"7600e1eb-c053-40f1-9367-36e5e53ff40f","created_by":"Ua3MKU1uoHVOwOhfuS84TykJaRk2","cancelled_at":null,"cancellation_reason":null,"doctor_id":"4baef626-bd28-4f22-ac5c-68e304e16159","booked_by":null,"specialty":"obgyn","specialty_subtype":"general_obgyn","patient":{"id":"99cb75af-16ed-444a-86d4-d4ebf37d4647","sex":"Female","name":"juliet bangari","email":"juliet@aneya.com","phone":"","user_id":null,"archived":false,"age_years":null,"allergies":"","height_cm":null,"weight_kg":null,"created_at":"2025-12-29T07:50:40.756656+00:00","created_by":"Ua3MKU1uoHVOwOhfuS84TykJaRk2","updated_at":"2025-12-29T07:50:40.756656+00:00","date_of_birth":"1989-06-06","current_conditions":"","current_medications":"","consultation_language":"en-IN","migrated_to_shared_health_record":false}},{"id":"d167b65b-39eb-4a05-ae66-ef093be3d8a6","created_at":"2025-12-29T07:05:33.653279+00:00","updated_at":"2025-12-29T07:09:18.070071+00:00","patient_id":"2c287b52-9f4d-495d-8831-daa4331978b6","scheduled_time":"2025-12-29T03:30:00+00:00","duration_minutes":15,"status":"completed","appointment_type":"obgyn_general_obgyn","reason":"","notes":"","consultation_id":"188da78a-dfa5-45dc-9681-b11a33bdd436","created_by":"Ua3MKU1uoHVOwOhfuS84TykJaRk2","cancelled_at":null,"cancellation_reason":null,"doctor_id":"4baef626-bd28-4f22-ac5c-68e304e16159","booked_by":null,"specialty":"obgyn","specialty_subtype":"general_obgyn","patient":{"id":"2c287b52-9f4d-495d-8831-daa4331978b6","sex":"Female","name":"Madhuri kulkarni","email":"Madhuri_kulkarni@aneya.com","phone":"","user_id":null,"archived":false,"age_years":null,"allergies":"","height_cm":null,"weight_kg":null,...[truncated]
+15:04
+"⏱️ Consultations quer
