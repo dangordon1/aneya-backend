@@ -17,13 +17,8 @@ from reportlab.lib.utils import ImageReader
 from typing import Dict, Any, Optional
 import requests
 
-
-# Aneya color scheme
-ANEYA_NAVY = HexColor('#0c3555')
-ANEYA_TEAL = HexColor('#1d9e99')
-ANEYA_GRAY = HexColor('#6b7280')
-ANEYA_LIGHT_GRAY = HexColor('#d1d5db')
-ANEYA_CREAM = HexColor('#f6f5ee')
+# Import design tokens model
+from models.design_tokens import DesignTokens
 
 
 
@@ -238,7 +233,7 @@ def render_clinic_logo(c: canvas.Canvas, y: float, logo_url: str) -> bool:
 
 
 def render_header(c: canvas.Canvas, y: float, doctor_info: Optional[Dict[str, Any]] = None,
-                 primary_color=ANEYA_NAVY, text_color=ANEYA_GRAY) -> float:
+                 tokens: Optional[DesignTokens] = None) -> float:
     """
     Render the PDF header with title, generation date, and optional clinic logo
 
@@ -246,12 +241,18 @@ def render_header(c: canvas.Canvas, y: float, doctor_info: Optional[Dict[str, An
         c: ReportLab canvas
         y: Current Y position
         doctor_info: Optional dict with clinic_name and clinic_logo_url
-        primary_color: Primary color for title
-        text_color: Text color for date
+        tokens: Design tokens for styling
 
     Returns:
         float: Updated Y position
     """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+    typo = tokens.typography
+    spacing = tokens.spacing
+
     width, height = A4
 
     # Try to render clinic logo if available
@@ -261,63 +262,84 @@ def render_header(c: canvas.Canvas, y: float, doctor_info: Optional[Dict[str, An
 
     # Fallback to clinic name as text if no logo rendered
     if not logo_rendered and doctor_info and doctor_info.get('clinic_name'):
-        c.setFillColor(primary_color)
-        c.setFont("Helvetica-Bold", 12)
+        c.setFillColor(colors["primary"])
+        font_name, font_size = typo.body.to_reportlab_font()
+        c.setFont(font_name, font_size + 2)
         c.drawRightString(19*cm, y + 0.5*cm, doctor_info['clinic_name'])
 
     # Title
-    c.setFillColor(primary_color)
-    c.setFont("Helvetica-Bold", 20)
+    c.setFillColor(colors["primary"])
+    font_name, font_size = typo.heading_1.to_reportlab_font()
+    c.setFont(font_name, font_size)
     c.drawCentredString(width/2, y, "Consultation Report")
-    y -= 0.5*cm
+    y -= spacing.field_spacing * cm
 
     # Generation date
-    c.setFillColor(text_color)
-    c.setFont("Helvetica", 10)
+    c.setFillColor(colors["text"])
+    font_name, font_size = typo.body.to_reportlab_font()
+    c.setFont(font_name, font_size)
     generation_date = datetime.now().strftime('%d %B %Y at %H:%M')
     c.drawCentredString(width/2, y, f"Generated: {generation_date}")
-    y -= 1.5*cm
+    y -= spacing.section_spacing * cm
 
     return y
 
 
 def render_section_header(c: canvas.Canvas, title: str, y: float,
-                         primary_color=ANEYA_NAVY, accent_color=ANEYA_TEAL) -> float:
+                         tokens: Optional[DesignTokens] = None) -> float:
     """Render a section header"""
-    c.setFillColor(primary_color)
-    c.setFont("Helvetica-Bold", 14)
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+    typo = tokens.typography
+    spacing = tokens.spacing
+
+    c.setFillColor(colors["primary"])
+    font_name, font_size = typo.heading_2.to_reportlab_font()
+    c.setFont(font_name, font_size)
     c.drawString(2*cm, y, title)
     y -= 0.2*cm
 
     # Underline
-    c.setStrokeColor(accent_color)
+    c.setStrokeColor(colors["accent"])
     c.setLineWidth(2)
     c.line(2*cm, y, 19*cm, y)
-    y -= 0.6*cm
+    y -= spacing.section_spacing * cm
 
     return y
 
 
 def render_field(c: canvas.Canvas, label: str, value: Any, y: float, x_offset: float = 2*cm,
-                text_color=ANEYA_GRAY, primary_color=ANEYA_NAVY) -> float:
+                tokens: Optional[DesignTokens] = None) -> float:
     """Render a field with label and value"""
     if value is None or value == '' or value == []:
         return y
 
-    c.setFillColor(primary_color)
-    c.setFont("Helvetica-Bold", 10)
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+    typo = tokens.typography
+    spacing = tokens.spacing
+
+    c.setFillColor(colors["primary"])
+    font_name, font_size = typo.body_bold.to_reportlab_font()
+    c.setFont(font_name, font_size)
 
     # Calculate label width to ensure enough spacing
     label_text = f"{label}:"
-    label_width = c.stringWidth(label_text, "Helvetica-Bold", 10)
+    label_font_name, label_font_size = typo.body_bold.to_reportlab_font()
+    label_width = c.stringWidth(label_text, label_font_name, label_font_size)
 
     # Use dynamic spacing: label width + small gap (0.3cm ~ 1 space)
     value_x_offset = x_offset + label_width + 0.3*cm
 
     c.drawString(x_offset, y, label_text)
 
-    c.setFillColor(text_color)
-    c.setFont("Helvetica", 10)
+    c.setFillColor(colors["text"])
+    value_font_name, value_font_size = typo.body.to_reportlab_font()
+    c.setFont(value_font_name, value_font_size)
 
     # Convert value to string
     value_str = str(value)
@@ -332,7 +354,7 @@ def render_field(c: canvas.Canvas, label: str, value: Any, y: float, x_offset: f
 
         for word in words:
             test_line = f"{current_line} {word}".strip()
-            if c.stringWidth(test_line, "Helvetica", 10) <= max_width:
+            if c.stringWidth(test_line, value_font_name, value_font_size) <= max_width:
                 current_line = test_line
             else:
                 if current_line:
@@ -345,15 +367,15 @@ def render_field(c: canvas.Canvas, label: str, value: Any, y: float, x_offset: f
         # Draw first line next to label
         if lines:
             c.drawString(value_x_offset, y, lines[0])
-            y -= 0.4*cm
+            y -= spacing.line_spacing * cm
 
             # Draw remaining lines
             for line in lines[1:]:
                 c.drawString(value_x_offset, y, line)
-                y -= 0.4*cm
+                y -= spacing.line_spacing * cm
     else:
         c.drawString(value_x_offset, y, value_str)
-        y -= 0.4*cm
+        y -= spacing.line_spacing * cm
 
     return y
 
@@ -561,9 +583,7 @@ def render_table_field(
     schema_field: Dict[str, Any],
     form_data: Dict[str, Any],
     y: float,
-    primary_color=ANEYA_NAVY,
-    text_color=ANEYA_GRAY,
-    light_gray_color=ANEYA_LIGHT_GRAY
+    tokens: Optional[DesignTokens] = None
 ) -> float:
     """
     Render a table/array field with headers and rows.
@@ -577,13 +597,18 @@ def render_table_field(
         schema_field: Field schema definition
         form_data: Form data
         y: Current Y position
-        primary_color: Primary color for headers
-        text_color: Text color for cells
-        light_gray_color: Light gray color for backgrounds
+        tokens: Design tokens for styling
 
     Returns:
         Updated Y position
     """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors_dict = tokens.colors.to_hex_colors()
+    typo = tokens.typography
+    spacing = tokens.spacing
+
     from reportlab.platypus import Table, TableStyle, Paragraph
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib import colors
@@ -671,7 +696,7 @@ def render_table_field(
     # Table title (skip if splitting, as each chunk will have its own title)
     if not needs_split:
         c.setFont("Helvetica-Bold", 10)
-        c.setFillColor(primary_color)
+        c.setFillColor(colors_dict["primary"])
         left_margin = 1*cm if needs_landscape else 2*cm
         c.drawString(left_margin, y, f"• {label}")
         y -= 0.6*cm
@@ -842,7 +867,7 @@ def render_table_field(
 
             # Render table title (with part indicator for continuation, 1cm margin for landscape)
             c.setFont("Helvetica-Bold", 10)
-            c.setFillColor(primary_color)
+            c.setFillColor(colors_dict["primary"])
             if chunk_idx > 0:
                 c.drawString(1*cm, y, f"• {label} (continued - Part {chunk_idx + 1})")
             else:
@@ -856,15 +881,15 @@ def render_table_field(
             pdf_table = Table(chunk_table_data, colWidths=chunk_widths, rowHeights=row_heights)
 
             table_style = [
-                ('BACKGROUND', (0, 0), (-1, 0), light_gray_color),
-                ('TEXTCOLOR', (0, 0), (-1, 0), primary_color),
+                ('BACKGROUND', (0, 0), (-1, 0), colors_dict["text_light"]),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors_dict["primary"]),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
                 ('FONTSIZE', (0, 0), (-1, 0), 7),
                 ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
                 ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, ANEYA_CREAM]),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors_dict["background_light"]]),
                 ('LEFTPADDING', (0, 0), (-1, -1), 3),
                 ('RIGHTPADDING', (0, 0), (-1, -1), 3),
                 ('TOPPADDING', (0, 0), (-1, -1), 3),
@@ -901,15 +926,15 @@ def render_table_field(
 
     # Base table style
     table_style = [
-        ('BACKGROUND', (0, 0), (-1, 0), light_gray_color),
-        ('TEXTCOLOR', (0, 0), (-1, 0), primary_color),
+        ('BACKGROUND', (0, 0), (-1, 0), colors_dict["text_light"]),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors_dict["primary"]),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTSIZE', (0, 0), (-1, 0), 7),
         ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
         ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, ANEYA_CREAM]),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors_dict["background_light"]]),
         ('LEFTPADDING', (0, 0), (-1, -1), 3),
         ('RIGHTPADDING', (0, 0), (-1, -1), 3),
         ('TOPPADDING', (0, 0), (-1, -1), 3),
@@ -919,7 +944,7 @@ def render_table_field(
     # Additional styling for transposed tables with row headers
     if is_transposed and row_names:
         table_style.extend([
-            ('BACKGROUND', (0, 1), (0, -1), light_gray_color),  # Row header column background
+            ('BACKGROUND', (0, 1), (0, -1), colors_dict["text_light"]),  # Row header column background
             ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),  # Row header column bold
             ('FONTSIZE', (0, 1), (0, -1), 7),
             ('ALIGN', (0, 1), (0, -1), 'LEFT'),  # Row headers left-aligned
@@ -949,10 +974,7 @@ def render_custom_form_section(
     form_data: Dict[str, Any],
     y: float,
     form_schema: Optional[Dict[str, Any]] = None,
-    primary_color=ANEYA_NAVY,
-    accent_color=ANEYA_TEAL,
-    text_color=ANEYA_GRAY,
-    light_gray_color=ANEYA_LIGHT_GRAY
+    tokens: Optional[DesignTokens] = None
 ) -> float:
     """
     Render a custom form section using pdf_template configuration.
@@ -963,14 +985,18 @@ def render_custom_form_section(
         form_data: Actual form data (JSONB)
         y: Current Y position
         form_schema: Optional form schema for table field rendering
-        primary_color: Primary color for headers
-        accent_color: Accent color for underlines
-        text_color: Text color for fields
-        light_gray_color: Light gray color for backgrounds
+        tokens: Design tokens for styling
 
     Returns:
         float: Updated Y position
     """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+    typo = tokens.typography
+    spacing = tokens.spacing
+
     width, height = A4
 
     # Get section ID and title
@@ -984,7 +1010,7 @@ def render_custom_form_section(
         y = height - 2*cm
 
     # Render section header
-    y = render_section_header(c, section_title, y, primary_color=primary_color, accent_color=accent_color)
+    y = render_section_header(c, section_title, y, tokens=tokens)
 
     # Get fields for this section
     fields = section_config.get('fields', [])
@@ -1017,8 +1043,7 @@ def render_custom_form_section(
 
             if is_table:
                 # Render table field (spans full width, ignores columns)
-                y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y,
-                                      primary_color=primary_color, text_color=text_color, light_gray_color=light_gray_color)
+                y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y, tokens=tokens)
 
                 # Check if table was landscape (returns -1 to force page break)
                 if y < 0:
@@ -1041,10 +1066,10 @@ def render_custom_form_section(
                 if y < 3*cm:
                     c.showPage()
                     y = height - 2*cm
-                    y = render_section_header(c, f"{section_title} - Continued", y, primary_color=primary_color, accent_color=accent_color)
+                    y = render_section_header(c, f"{section_title} - Continued", y, tokens=tokens)
 
                 # Render field
-                y = render_field(c, label, value, y, x_offset=x_offset, text_color=text_color, primary_color=primary_color)
+                y = render_field(c, label, value, y, x_offset=x_offset, tokens=tokens)
 
     elif layout == 'three_column':
         # Three column layout
@@ -1073,8 +1098,7 @@ def render_custom_form_section(
 
             if is_table:
                 # Render table field (spans full width, ignores columns)
-                y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y,
-                                      primary_color=primary_color, text_color=text_color, light_gray_color=light_gray_color)
+                y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y, tokens=tokens)
 
                 # Check if table was landscape (returns -1 to force page break)
                 if y < 0:
@@ -1102,10 +1126,10 @@ def render_custom_form_section(
                 if y < 3*cm:
                     c.showPage()
                     y = height - 2*cm
-                    y = render_section_header(c, f"{section_title} - Continued", y, primary_color=primary_color, accent_color=accent_color)
+                    y = render_section_header(c, f"{section_title} - Continued", y, tokens=tokens)
 
                 # Render field
-                y = render_field(c, label, value, y, x_offset=x_offset, text_color=text_color, primary_color=primary_color)
+                y = render_field(c, label, value, y, x_offset=x_offset, tokens=tokens)
 
     else:
         # Single column layout (default)
@@ -1150,10 +1174,10 @@ def render_custom_form_section(
                 if y < 3*cm:
                     c.showPage()
                     y = height - 2*cm
-                    y = render_section_header(c, f"{section_title} - Continued", y, primary_color=primary_color, accent_color=accent_color)
+                    y = render_section_header(c, f"{section_title} - Continued", y, tokens=tokens)
 
                 # Render field
-                y = render_field(c, label, value, y, text_color=text_color, primary_color=primary_color)
+                y = render_field(c, label, value, y, tokens=tokens)
 
     y -= 0.6*cm
     return y
@@ -1167,11 +1191,7 @@ def generate_custom_form_pdf(
     patient: Optional[Dict[str, Any]] = None,
     doctor_info: Optional[Dict[str, Any]] = None,
     form_schema: Optional[Dict[str, Any]] = None,
-    # NEW: Color customization
-    primary_color: Optional[str] = None,
-    accent_color: Optional[str] = None,
-    text_color: Optional[str] = None,
-    light_gray_color: Optional[str] = None
+    tokens: Optional[DesignTokens] = None
 ) -> BytesIO:
     """
     Generate a PDF for a custom form using stored pdf_template.
@@ -1184,19 +1204,18 @@ def generate_custom_form_pdf(
         patient: Optional patient information
         doctor_info: Optional dict with clinic_name and clinic_logo_url
         form_schema: Optional form schema for table rendering
-        primary_color: Optional primary color (hex string)
-        accent_color: Optional accent color (hex string)
-        text_color: Optional text color (hex string)
-        light_gray_color: Optional light gray color (hex string)
+        tokens: Optional DesignTokens for styling (falls back to Aneya defaults)
 
     Returns:
         BytesIO containing PDF bytes
     """
-    # Convert color parameters to HexColor, falling back to Aneya defaults
-    primary_hex = HexColor(primary_color) if primary_color else ANEYA_NAVY
-    accent_hex = HexColor(accent_color) if accent_color else ANEYA_TEAL
-    text_hex = HexColor(text_color) if text_color else ANEYA_GRAY
-    light_gray_hex = HexColor(light_gray_color) if light_gray_color else ANEYA_LIGHT_GRAY
+    # Use provided tokens or default to Aneya styling
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+    typo = tokens.typography
+    spacing = tokens.spacing
 
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -1211,26 +1230,29 @@ def generate_custom_form_pdf(
 
     # Render header
     if header_config.get('show_logo') or header_config.get('show_clinic_name'):
-        y = render_header(c, y, doctor_info, primary_color=primary_hex, text_color=text_hex)
+        y = render_header(c, y, doctor_info, tokens=tokens)
     else:
         # Simple header with form title
-        c.setFillColor(primary_hex)
-        c.setFont("Helvetica-Bold", 20)
+        c.setFillColor(colors["primary"])
+        font_name, font_size = typo.heading_1.to_reportlab_font()
+        c.setFont(font_name, font_size)
         form_title = header_config.get('title', format_field_label(form_name))
         c.drawCentredString(width/2, y, form_title)
-        y -= 0.5*cm
+        y -= spacing.field_spacing * cm
 
         # Specialty subtitle
-        c.setFillColor(text_hex)
-        c.setFont("Helvetica", 12)
+        c.setFillColor(colors["text"])
+        font_name, font_size = typo.body.to_reportlab_font()
+        c.setFont(font_name, font_size + 2)  # Slightly larger for subtitle
         c.drawCentredString(width/2, y, f"Specialty: {specialty.title()}")
-        y -= 0.5*cm
+        y -= spacing.field_spacing * cm
 
         # Generation date
-        c.setFont("Helvetica", 10)
+        font_name, font_size = typo.body.to_reportlab_font()
+        c.setFont(font_name, font_size)
         generation_date = datetime.now().strftime('%d %B %Y at %H:%M')
         c.drawCentredString(width/2, y, f"Generated: {generation_date}")
-        y -= 1.5*cm
+        y -= spacing.section_spacing * cm
 
     # Render patient section if provided
     if patient:
@@ -1255,15 +1277,14 @@ def generate_custom_form_pdf(
             y = height - 2*cm
 
         # Render section
-        y = render_custom_form_section(c, section_config, form_data, y, form_schema,
-                                      primary_color=primary_hex, accent_color=accent_hex,
-                                      text_color=text_hex, light_gray_color=light_gray_hex)
+        y = render_custom_form_section(c, section_config, form_data, y, form_schema, tokens=tokens)
 
     # Add footer if configured
     footer_config = page_config.get('footer', {})
     if footer_config.get('show_page_numbers') or footer_config.get('show_timestamp'):
-        c.setFillColor(light_gray_hex)
-        c.setFont("Helvetica", 8)
+        c.setFillColor(colors["text_light"])
+        font_name, font_size = typo.caption.to_reportlab_font()
+        c.setFont(font_name, font_size)
         c.drawCentredString(width/2, 1.5*cm, "Aneya Healthcare Platform")
         c.drawCentredString(width/2, 1*cm, "This document is confidential and for medical professionals only")
 

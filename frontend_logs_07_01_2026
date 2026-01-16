@@ -1,0 +1,40 @@
+00:48:59
+"⚠️ Chunk 0 already processing/processed, skipping"
+00:48:59
+"🔓 Processing lock released"
+00:48:59
+"🎤 Speech started"
+00:48:59
+"📩 Sarvam:" "events" {"type":"events","data":{"signal_type":"START_SPEECH","occured_at":1767860763.378975}}
+00:49:00
+"🤔 Should process next chunk? true (time=106s >= 60s)"
+00:49:00
+"⏱️ Recording monitor: isRecording=true, time=106s, lastChunk=-1, processing=false"
+00:49:00
+"🔒 Acquiring processing lock for chunk 0"
+00:49:00
+"📦 Extracting chunk 0: 0s - 60s (1 blobs available)"
+00:49:00
+"🎬 Processing chunk 0 at 106s"
+00:49:00
+" ✓ Extracted 1 blobs (0-1)"
+00:49:00
+"🔓 Processing lock released"
+00:49:00
+"⚠️ Chunk 0 already processing/processed, skipping"
+00:49:01
+"⏱️ Recording monitor: isRecording=true, time=107s, lastChunk=-1, processing=false"
+00:49:01
+"🔒 Acquiring processing lock for chunk 0"
+00:49:01
+"🤔 Should process next chunk? true (time=107s >= 60s)"
+00:49:01
+"🎬 Processing chunk 0 at 107s"
+00:49:01
+"📦 Extracting chunk 0: 0s - 60s (1 blobs available)"
+00:49:01
+" ✓ Extracted 1 blobs (0-1)"
+00:49:01
+"⚠️ Chunk 0 already processing/processed, skipping"
+00:49:01
+"The number of log records re

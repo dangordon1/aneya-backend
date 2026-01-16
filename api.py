@@ -2961,10 +2961,11 @@ async def send_otp(request: SendOTPRequest):
         if not supabase_url or not supabase_key:
             raise HTTPException(status_code=503, detail="Database not configured")
 
-        # Delete any existing unverified records for this user
+        # Delete any existing verification records for this user (both verified and unverified)
+        # This prevents unique constraint violations
         async with httpx.AsyncClient() as http_client:
             delete_response = await http_client.delete(
-                f"{supabase_url}/rest/v1/email_verifications?user_id=eq.{request.user_id}&is_verified=eq.false",
+                f"{supabase_url}/rest/v1/email_verifications?user_id=eq.{request.user_id}",
                 headers={
                     "apikey": supabase_key,
                     "Authorization": f"Bearer {supabase_key}",
@@ -3056,8 +3057,7 @@ async def send_otp(request: SendOTPRequest):
 </head>
 <body>
     <div class="container">
-        <div class="logo">aneya</div>
-        <p style="font-size: 18px; color: #666;">Clinical Decision Support</p>
+        <img src="https://aneya.health/aneya-logo.png" alt="Aneya" style="width: 150px; margin-bottom: 20px;" />
 
         <h2 style="color: #0c3555; margin-top: 30px;">Verify Your Email</h2>
 
@@ -3433,8 +3433,7 @@ async def resend_otp(request: ResendOTPRequest):
 </head>
 <body>
     <div class="container">
-        <div class="logo">aneya</div>
-        <p style="font-size: 18px; color: #666;">Clinical Decision Support</p>
+        <img src="https://aneya.health/aneya-logo.png" alt="Aneya" style="width: 150px; margin-bottom: 20px;" />
 
         <h2 style="color: #0c3555; margin-top: 30px;">Your New Verification Code</h2>
 
