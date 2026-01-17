@@ -210,3 +210,82 @@ class DesignTokens(BaseModel):
             print(f"✅ Tokens cached to {cache_path}")
         except Exception as e:
             print(f"⚠️  Failed to save tokens to cache: {e}")
+
+
+def get_clinic_design_tokens(clinic_id: str, supabase_client=None) -> dict:
+    """
+    Fetch clinic design tokens (logos, colors, contact info) from database.
+    Returns a simple dict suitable for React component props.
+    Falls back to Aneya defaults if not configured.
+
+    Args:
+        clinic_id: UUID of the clinic
+        supabase_client: Optional Supabase client instance
+
+    Returns:
+        Dict with logo_url, primary_color, accent_color, background_color,
+        clinic_name, and contact_info
+    """
+    # Default Aneya branding
+    default_branding = {
+        "logo_url": None,
+        "primary_color": "#0c3555",
+        "accent_color": "#1d9e99",
+        "background_color": "#f6f5ee",
+        "clinic_name": "Healthcare Medical Center",
+        "contact_info": {
+            "address": "456 Hospital Avenue",
+            "phone": "(555) 123-4567",
+            "fax": None
+        }
+    }
+
+    if not supabase_client:
+        print("⚠️  No Supabase client provided, using default branding")
+        return default_branding
+
+    try:
+        # Query clinic information
+        clinic_response = supabase_client.table("clinics").select("*").eq("id", clinic_id).single().execute()
+
+        if not clinic_response.data:
+            print(f"ℹ️  Clinic {clinic_id} not found, using default branding")
+            return default_branding
+
+        clinic_data = clinic_response.data
+
+        # Try to get clinic-specific design tokens/color scheme
+        design_tokens_response = supabase_client.table("clinic_design_tokens").select("*").eq(
+            "clinic_id", clinic_id
+        ).execute()
+
+        # Merge clinic data with design tokens
+        branding = {
+            "logo_url": None,
+            "primary_color": default_branding["primary_color"],
+            "accent_color": default_branding["accent_color"],
+            "background_color": default_branding["background_color"],
+            "clinic_name": clinic_data.get("name", default_branding["clinic_name"]),
+            "contact_info": {
+                "address": clinic_data.get("address"),
+                "phone": clinic_data.get("phone"),
+                "fax": clinic_data.get("fax")
+            }
+        }
+
+        # If design tokens exist, override colors and logo
+        if design_tokens_response.data and len(design_tokens_response.data) > 0:
+            tokens = design_tokens_response.data[0]
+            branding["logo_url"] = tokens.get("logo_url")
+            branding["primary_color"] = tokens.get("primary_color", branding["primary_color"])
+            branding["accent_color"] = tokens.get("accent_color", branding["accent_color"])
+            branding["background_color"] = tokens.get("background_color", branding["background_color"])
+            print(f"✅ Loaded custom design tokens for clinic {clinic_id}")
+        else:
+            print(f"ℹ️  No custom design tokens for clinic {clinic_id}, using clinic info with default colors")
+
+        return branding
+
+    except Exception as e:
+        print(f"⚠️  Error fetching clinic branding: {e}, using defaults")
+        return default_branding

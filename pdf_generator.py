@@ -5,6 +5,7 @@ This module generates PDF reports for consultations, including:
 - Appointment details
 - Patient information
 - Consultation form data (all form types)
+- Prescription documents
 """
 
 from io import BytesIO
@@ -14,11 +15,20 @@ from reportlab.lib.units import cm
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import HexColor
 from reportlab.lib.utils import ImageReader
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import requests
 
 # Import design tokens model
 from models.design_tokens import DesignTokens
+
+# QR code imports
+try:
+    import qrcode
+    from qrcode.image.pil import PilImage
+    HAS_QRCODE = True
+except ImportError:
+    HAS_QRCODE = False
+    print("⚠️ qrcode library not installed - QR codes will be disabled")
 
 
 
@@ -1290,4 +1300,566 @@ def generate_custom_form_pdf(
 
     c.save()
     buffer.seek(0)
+    return buffer
+
+
+# ============================================================================
+# PRESCRIPTION PDF GENERATION
+# ============================================================================
+
+def render_qr_code(c: canvas.Canvas, consultation_url: str, x: float, y: float, size: float = 2*cm) -> bool:
+    """
+    Render a QR code containing the consultation verification URL.
+
+    Args:
+        c: ReportLab canvas
+        consultation_url: URL to encode in QR code
+        x: X position for QR code
+        y: Y position for QR code (bottom-left of QR)
+        size: Size of QR code (default 2cm)
+
+    Returns:
+        bool: True if QR code rendered successfully
+    """
+    if not HAS_QRCODE:
+        print("⚠️ QR code library not available, skipping QR code")
+        return False
+
+    if not consultation_url:
+        print("⚠️ No consultation URL provided for QR code")
+        return False
+
+    try:
+        # Generate QR code
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=1,
+        )
+        qr.add_data(str(consultation_url))  # Ensure string type
+        qr.make(fit=True)
+
+        # Create PIL image - use pure PIL mode for better compatibility
+        qr_image = qr.make_image(fill_color="black", back_color="white")
+
+        # Ensure we have a proper PIL Image
+        if hasattr(qr_image, 'get_image'):
+            pil_image = qr_image.get_image()
+        else:
+            pil_image = qr_image
+
+        # Convert to BytesIO for ReportLab
+        img_buffer = BytesIO()
+        pil_image.save(img_buffer, format='PNG')
+        img_buffer.seek(0)
+
+        # Draw on canvas
+        img = ImageReader(img_buffer)
+        c.drawImage(img, x, y, width=size, height=size)
+
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to render QR code: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def render_signature_watermark(
+    c: canvas.Canvas,
+    doctor_name: str,
+    x: float,
+    y: float,
+    tokens: Optional[DesignTokens] = None
+):
+    """
+    Render doctor's name as a diagonal semi-transparent watermark.
+
+    Args:
+        c: ReportLab canvas
+        doctor_name: Doctor's name to render
+        x: Center X position
+        y: Center Y position
+        tokens: Design tokens for styling
+    """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    # Ensure doctor_name is a valid string
+    if not doctor_name:
+        doctor_name = "Doctor"
+    doctor_name = str(doctor_name)
+
+    c.saveState()
+
+    # Set up semi-transparent watermark
+    c.translate(x, y)
+    c.rotate(45)  # 45 degree diagonal
+
+    # Use primary color with transparency (approximate with lighter version)
+    # ReportLab doesn't support true alpha, so we use a light tint
+    watermark_color = HexColor("#B8C6D1")  # Light version of primary
+    c.setFillColor(watermark_color)
+    c.setFont("Helvetica-Bold", 24)
+
+    # Draw centered text
+    c.drawCentredString(0, 0, doctor_name)
+
+    c.restoreState()
+
+
+def render_prescription_header(
+    c: canvas.Canvas,
+    y: float,
+    doctor_info: Dict[str, Any],
+    consultation_date: str,
+    tokens: Optional[DesignTokens] = None
+) -> float:
+    """
+    Render prescription header with clinic branding and date.
+
+    Args:
+        c: ReportLab canvas
+        y: Current Y position
+        doctor_info: Doctor information including clinic details
+        consultation_date: Date of consultation
+        tokens: Design tokens for styling
+
+    Returns:
+        float: Updated Y position
+    """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+    typo = tokens.typography
+
+    width, height = A4
+
+    # Try to render clinic logo if available
+    logo_rendered = False
+    if doctor_info.get('clinic_logo_url'):
+        logo_rendered = render_clinic_logo(c, y, doctor_info['clinic_logo_url'])
+
+    # Clinic name (left side)
+    clinic_name = doctor_info.get('clinic_name', 'Medical Clinic')
+    c.setFillColor(colors["primary"])
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(2*cm, y, clinic_name)
+    y -= 0.6*cm
+
+    # Clinic address if available
+    if doctor_info.get('clinic_address'):
+        c.setFillColor(colors["text"])
+        c.setFont("Helvetica", 9)
+        c.drawString(2*cm, y, doctor_info['clinic_address'])
+        y -= 0.4*cm
+
+    # Doctor name and credentials
+    doctor_name = doctor_info.get('name', 'Doctor')
+    c.setFillColor(colors["primary"])
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(2*cm, y, f"Dr. {doctor_name}")
+
+    # Date on right side
+    c.setFillColor(colors["text"])
+    c.setFont("Helvetica", 10)
+    c.drawRightString(19*cm, y, f"Date: {consultation_date}")
+    y -= 0.4*cm
+
+    # Qualifications if available
+    if doctor_info.get('qualifications'):
+        c.setFont("Helvetica", 9)
+        c.setFillColor(colors["text"])
+        c.drawString(2*cm, y, doctor_info['qualifications'])
+        y -= 0.4*cm
+
+    # Registration number if available
+    if doctor_info.get('license_number'):
+        c.setFont("Helvetica", 9)
+        c.setFillColor(colors["text"])
+        c.drawString(2*cm, y, f"Reg. No: {doctor_info['license_number']}")
+        y -= 0.4*cm
+
+    y -= 0.4*cm
+
+    # Draw divider line
+    c.setStrokeColor(colors["accent"])
+    c.setLineWidth(2)
+    c.line(2*cm, y, 19*cm, y)
+    y -= 0.8*cm
+
+    return y
+
+
+def render_prescription_patient_info(
+    c: canvas.Canvas,
+    y: float,
+    patient: Dict[str, Any],
+    tokens: Optional[DesignTokens] = None
+) -> float:
+    """
+    Render patient information section on prescription.
+
+    Args:
+        c: ReportLab canvas
+        y: Current Y position
+        patient: Patient information
+        tokens: Design tokens for styling
+
+    Returns:
+        float: Updated Y position
+    """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+
+    # Patient name
+    c.setFillColor(colors["primary"])
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(2*cm, y, "Patient:")
+
+    c.setFillColor(colors["text"])
+    c.setFont("Helvetica", 11)
+    patient_name = patient.get('name', 'Unknown')
+    c.drawString(4.5*cm, y, patient_name)
+
+    # Patient ID on right side if available
+    if patient.get('id'):
+        c.setFont("Helvetica", 10)
+        c.drawRightString(19*cm, y, f"ID: {str(patient['id'])[:8]}...")
+
+    y -= 0.5*cm
+
+    # Age and sex on same line
+    patient_details = []
+    if patient.get('age_years') or patient.get('date_of_birth'):
+        age = patient.get('age_years')
+        if not age and patient.get('date_of_birth'):
+            try:
+                dob_str = patient['date_of_birth']
+                if 'T' in dob_str:
+                    dob_str = dob_str.split('T')[0]
+                dob = datetime.strptime(dob_str, '%Y-%m-%d')
+                age = (datetime.now() - dob).days // 365
+            except:
+                pass
+        if age:
+            patient_details.append(f"Age: {age} years")
+
+    if patient.get('sex'):
+        patient_details.append(f"Sex: {patient['sex']}")
+
+    if patient_details:
+        c.setFont("Helvetica", 10)
+        c.drawString(2*cm, y, " | ".join(patient_details))
+        y -= 0.5*cm
+
+    y -= 0.3*cm
+
+    return y
+
+
+def render_rx_symbol(c: canvas.Canvas, x: float, y: float, tokens: Optional[DesignTokens] = None):
+    """
+    Render the Rx prescription symbol.
+
+    Args:
+        c: ReportLab canvas
+        x: X position
+        y: Y position
+        tokens: Design tokens for styling
+    """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+
+    c.setFillColor(colors["primary"])
+    c.setFont("Helvetica-Bold", 28)
+    c.drawString(x, y, "Rx")
+
+
+def render_medications_table(
+    c: canvas.Canvas,
+    y: float,
+    prescriptions: List[Dict[str, Any]],
+    tokens: Optional[DesignTokens] = None
+) -> float:
+    """
+    Render medications in a structured table format.
+
+    Args:
+        c: ReportLab canvas
+        y: Current Y position
+        prescriptions: List of prescription dictionaries
+        tokens: Design tokens for styling
+
+    Returns:
+        float: Updated Y position
+    """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+
+    width, height = A4
+
+    # Rx symbol
+    render_rx_symbol(c, 2*cm, y - 0.3*cm, tokens)
+    y -= 1.2*cm
+
+    if not prescriptions:
+        c.setFillColor(colors["text"])
+        c.setFont("Helvetica-Oblique", 10)
+        c.drawString(2*cm, y, "No medications prescribed")
+        return y - 1*cm
+
+    # Column definitions
+    col_x = {
+        'num': 2*cm,
+        'drug': 2.8*cm,
+        'qty': 10*cm,
+        'dose': 12*cm,
+    }
+
+    # Table header (subtle)
+    c.setFillColor(colors["text_light"])
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(col_x['drug'], y, "Medication")
+    c.drawString(col_x['qty'], y, "Qty")
+    c.drawString(col_x['dose'], y, "Dosage Instructions")
+    y -= 0.5*cm
+
+    # Draw header line
+    c.setStrokeColor(colors["text_light"])
+    c.setLineWidth(0.5)
+    c.line(2*cm, y + 0.15*cm, 19*cm, y + 0.15*cm)
+
+    # Render each medication
+    for idx, med in enumerate(prescriptions, 1):
+        drug_name = med.get('drug_name', 'Unknown medication')
+        amount = med.get('amount', '')
+        method = med.get('method', '')
+        frequency = med.get('frequency', '')
+        duration = med.get('duration', '')
+
+        # Check for page break
+        if y < 4*cm:
+            c.showPage()
+            y = height - 2*cm
+            # Re-render Rx symbol on new page
+            render_rx_symbol(c, 2*cm, y - 0.3*cm, tokens)
+            y -= 1.5*cm
+
+        # Medication number
+        c.setFillColor(colors["primary"])
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(col_x['num'], y, f"{idx}.")
+
+        # Drug name (bold)
+        c.setFillColor(colors["primary"])
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(col_x['drug'], y, drug_name)
+
+        # Quantity
+        if amount:
+            c.setFillColor(colors["text"])
+            c.setFont("Helvetica", 10)
+            c.drawString(col_x['qty'], y, str(amount))
+
+        y -= 0.5*cm
+
+        # Dosage instructions (second line, indented)
+        dosage_parts = []
+        if method:
+            dosage_parts.append(method)
+        if frequency:
+            dosage_parts.append(frequency)
+        if duration:
+            dosage_parts.append(f"for {duration}")
+
+        if dosage_parts:
+            c.setFillColor(colors["text"])
+            c.setFont("Helvetica", 10)
+            dosage_text = " - ".join(dosage_parts)
+            c.drawString(col_x['drug'], y, dosage_text)
+            y -= 0.5*cm
+
+        y -= 0.3*cm  # Extra spacing between medications
+
+    return y
+
+
+def render_prescription_footer(
+    c: canvas.Canvas,
+    doctor_info: Dict[str, Any],
+    consultation_id: str,
+    tokens: Optional[DesignTokens] = None
+):
+    """
+    Render prescription footer with signature area, QR code, and clinic info.
+
+    Args:
+        c: ReportLab canvas
+        doctor_info: Doctor information
+        consultation_id: Consultation ID for QR code
+        tokens: Design tokens for styling
+    """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    colors = tokens.colors.to_hex_colors()
+
+    width, height = A4
+
+    # Signature area (right side)
+    sig_x = 13*cm
+    sig_y = 5*cm
+
+    # Render signature watermark
+    doctor_name = doctor_info.get('name', 'Doctor')
+    render_signature_watermark(c, f"Dr. {doctor_name}", sig_x + 3*cm, sig_y + 1*cm, tokens)
+
+    # Signature line
+    c.setStrokeColor(colors["text_light"])
+    c.setLineWidth(1)
+    c.line(sig_x, sig_y - 0.5*cm, 19*cm, sig_y - 0.5*cm)
+
+    # Doctor credentials below signature line
+    c.setFillColor(colors["primary"])
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(sig_x + 3*cm, sig_y - 1*cm, f"Dr. {doctor_name}")
+
+    if doctor_info.get('qualifications'):
+        c.setFillColor(colors["text"])
+        c.setFont("Helvetica", 9)
+        c.drawCentredString(sig_x + 3*cm, sig_y - 1.4*cm, doctor_info['qualifications'])
+
+    if doctor_info.get('license_number'):
+        c.setFont("Helvetica", 9)
+        c.drawCentredString(sig_x + 3*cm, sig_y - 1.8*cm, f"Reg. No: {doctor_info['license_number']}")
+
+    # QR code (left side)
+    qr_url = f"https://aneya.health/consultations/{consultation_id}"
+    qr_rendered = render_qr_code(c, qr_url, 2*cm, 3.5*cm, size=2.2*cm)
+
+    if qr_rendered:
+        c.setFillColor(colors["text"])
+        c.setFont("Helvetica", 7)
+        c.drawString(2*cm, 3.2*cm, "Scan to verify")
+
+    # Footer line
+    c.setStrokeColor(colors["text_light"])
+    c.setLineWidth(0.5)
+    c.line(2*cm, 2.5*cm, 19*cm, 2.5*cm)
+
+    # Clinic contact info in footer
+    c.setFillColor(colors["text"])
+    c.setFont("Helvetica", 8)
+
+    footer_parts = []
+    if doctor_info.get('clinic_name'):
+        footer_parts.append(doctor_info['clinic_name'])
+    if doctor_info.get('clinic_address'):
+        footer_parts.append(doctor_info['clinic_address'])
+    if doctor_info.get('clinic_phone'):
+        footer_parts.append(f"Tel: {doctor_info['clinic_phone']}")
+
+    if footer_parts:
+        footer_text = " | ".join(footer_parts)
+        # Truncate if too long
+        if len(footer_text) > 100:
+            footer_text = footer_text[:97] + "..."
+        c.drawCentredString(width/2, 2*cm, footer_text)
+
+    # Generated by Aneya
+    c.setFillColor(colors["text_light"])
+    c.setFont("Helvetica", 7)
+    c.drawCentredString(width/2, 1.5*cm, "Generated by Aneya Healthcare Platform")
+
+
+def generate_prescription_pdf(
+    prescriptions: List[Dict[str, Any]],
+    patient: Dict[str, Any],
+    doctor_info: Dict[str, Any],
+    consultation_id: str,
+    consultation_date: str,
+    tokens: Optional[DesignTokens] = None
+) -> BytesIO:
+    """
+    Generate a prescription PDF document.
+
+    Args:
+        prescriptions: List of prescription dicts with drug_name, amount, method, frequency, duration
+        patient: Patient information dict with name, id, age_years/date_of_birth, sex
+        doctor_info: Doctor information dict with name, qualifications, license_number,
+                     clinic_name, clinic_logo_url, clinic_address, clinic_phone
+        consultation_id: UUID of the consultation for QR code verification
+        consultation_date: Date of consultation (DD/MM/YYYY format)
+        tokens: Optional design tokens for styling
+
+    Returns:
+        BytesIO containing PDF bytes
+    """
+    if tokens is None:
+        tokens = DesignTokens.default()
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    # Start Y position
+    y = height - 2*cm
+
+    # Render header with clinic branding
+    try:
+        print("  [PDF] Rendering header...")
+        y = render_prescription_header(c, y, doctor_info, consultation_date, tokens)
+        print("  [PDF] Header done")
+    except Exception as e:
+        print(f"  [PDF] ❌ Header failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    # Render patient info
+    try:
+        print("  [PDF] Rendering patient info...")
+        y = render_prescription_patient_info(c, y, patient, tokens)
+        print("  [PDF] Patient info done")
+    except Exception as e:
+        print(f"  [PDF] ❌ Patient info failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    # Render medications table
+    try:
+        print("  [PDF] Rendering medications table...")
+        y = render_medications_table(c, y, prescriptions, tokens)
+        print("  [PDF] Medications table done")
+    except Exception as e:
+        print(f"  [PDF] ❌ Medications table failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    # Render footer with signature and QR code
+    try:
+        print("  [PDF] Rendering footer...")
+        render_prescription_footer(c, doctor_info, consultation_id, tokens)
+        print("  [PDF] Footer done")
+    except Exception as e:
+        print(f"  [PDF] ❌ Footer failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+    c.save()
+    buffer.seek(0)
+
+    print(f"✅ Prescription PDF generated for {len(prescriptions)} medications")
     return buffer
