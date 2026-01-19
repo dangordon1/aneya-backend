@@ -29,7 +29,6 @@ import uuid
 import traceback
 from datetime import datetime, timezone, timedelta
 from google.cloud import storage
-from pdf_generator import generate_consultation_pdf
 import firebase_admin
 from firebase_admin import credentials
 from functools import lru_cache
@@ -3573,7 +3572,8 @@ async def delete_appointment(appointment_id: str):
 @app.get("/api/appointments/{appointment_id}/consultation-pdf")
 async def download_consultation_pdf(appointment_id: str):
     """
-    Generate and download a PDF of the consultation form and appointment details.
+    Generate and download a PDF of the consultation form using DoctorReportCard styling.
+    Uses headless browser (Playwright) to render React components as PDF.
 
     Args:
         appointment_id: UUID of the appointment
@@ -3596,7 +3596,7 @@ async def download_consultation_pdf(appointment_id: str):
         # Get Supabase client
         supabase = get_supabase_client()
 
-        # Fetch appointment with patient and doctor data
+        # Fetch appointment with patient, doctor, and clinic data
         print(f"📄 Fetching appointment data for PDF generation: {appointment_id}")
 
         appointment_result = supabase.table("appointments")\
@@ -3610,15 +3610,7 @@ async def download_consultation_pdf(appointment_id: str):
         appointment = appointment_result.data[0]
         patient = appointment['patient']
 
-        # Extract doctor info for PDF header (logo and clinic name)
-        doctor_info = None
-        if appointment.get('doctor'):
-            doctor_info = {
-                'clinic_name': appointment['doctor'].get('clinic_name'),
-                'clinic_logo_url': appointment['doctor'].get('clinic_logo_url')
-            }
-
-        # Fetch consultation form from new consultation_forms table
+        # Fetch consultation form
         form_result = supabase.table("consultation_forms")\
             .select("*")\
             .eq("appointment_id", appointment_id)\
@@ -3638,7 +3630,7 @@ async def download_consultation_pdf(appointment_id: str):
         specialty = form_record.get('specialty', 'general')
         print(f"✅ Found consultation form (type: {form_type}, specialty: {specialty})")
 
-        # Look up the matching custom_form to get the PDF template
+        # Get form schema from custom_forms table
         custom_form_result = supabase.table("custom_forms")\
             .select("*")\
             .ilike("form_name", f"%{form_type}%")\
@@ -3650,74 +3642,61 @@ async def download_consultation_pdf(appointment_id: str):
         if not custom_form_result.data:
             raise HTTPException(
                 status_code=404,
-                detail=f"No active custom form template found for form type '{form_type}' and specialty '{specialty}'"
+                detail=f"No active custom form template found for form type '{form_type}'"
             )
 
         custom_form = custom_form_result.data[0]
-        pdf_template = custom_form.get('pdf_template')
+        form_schema = custom_form.get('form_schema', {})
+        print(f"✅ Found custom form schema: {custom_form['form_name']}")
 
-        if not pdf_template:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Form '{custom_form['form_name']}' does not have a PDF template configured"
-            )
+        # Get clinic branding (logos, colors, contact info)
+        from models.design_tokens import get_clinic_design_tokens
 
-        print(f"✅ Found custom form template: {custom_form['form_name']}")
+        clinic_id = None
+        if appointment.get('doctor'):
+            # Try to get clinic_id from doctor record directly
+            clinic_id = appointment['doctor'].get('clinic_id')
 
-        # Convert flat form_data (dot notation) to nested structure for PDF generator
-        # PDF generator expects: {"section": {"field": "value"}}
-        # But form_data has: {"section.field": "value"}
-        nested_form_data = {}
-        for key, value in form_data.items():
-            if '.' in key:
-                parts = key.split('.', 1)  # Split only on first dot
-                section, field = parts[0], parts[1]
+        clinic_branding = get_clinic_design_tokens(clinic_id, supabase) if clinic_id else None
 
-                if section not in nested_form_data:
-                    nested_form_data[section] = {}
+        # Prepare patient info
+        patient_info = {
+            "name": patient['name'],
+            "id": patient.get('id'),
+            "date_of_birth": patient.get('date_of_birth'),
+            "age": patient.get('age'),
+            "sex": patient.get('sex'),
+            "phone": patient.get('phone'),
+            "address": patient.get('address')
+        }
 
-                nested_form_data[section][field] = value
-            else:
-                # Top-level field (no section)
-                nested_form_data[key] = value
+        # Prepare appointment info
+        appointment_info = {
+            "id": appointment['id'],
+            "scheduled_time": appointment['scheduled_time'],
+            "status": appointment.get('status', 'completed'),
+            "doctor": {
+                "name": appointment['doctor']['name'] if appointment.get('doctor') else None,
+                "license_number": appointment['doctor'].get('license_number') if appointment.get('doctor') else None
+            }
+        }
 
-        print(f"📊 Converted {len(form_data)} flat fields to {len(nested_form_data)} sections")
+        # Generate PDF using headless browser
+        from pdf_generator_headless import generate_consultation_pdf
 
-        # Import PDF generator (same as used for form extraction PDF preview)
-        from pdf_generator import generate_custom_form_pdf
-        from models.design_tokens import DesignTokens
-
-        # Load clinic-specific design tokens (colors from database, falls back to Aneya defaults)
-        tokens = None
-        if appointment.get('doctor') and appointment['doctor'].get('id'):
-            doctor_id = appointment['doctor']['id']
-            print(f"🎨 Loading design tokens for clinic: {doctor_id}")
-            try:
-                tokens = await DesignTokens.from_clinic(doctor_id)
-                print(f"✅ Design tokens loaded successfully")
-            except Exception as e:
-                print(f"⚠️  Failed to load design tokens, using defaults: {e}")
-                tokens = DesignTokens.default()
-        else:
-            print(f"ℹ️  No doctor ID found, using default Aneya design tokens")
-            tokens = DesignTokens.default()
-
-        # Generate PDF with actual form data
-        print(f"📄 Generating PDF for form type: {form_type}")
-        pdf_buffer = generate_custom_form_pdf(
-            form_data=nested_form_data,  # Use nested structure
-            pdf_template=pdf_template,
-            form_name=custom_form['form_name'],
-            specialty=specialty,
-            patient=patient,
-            doctor_info=doctor_info,
-            form_schema=custom_form.get('form_schema'),  # Pass schema for table rendering
-            tokens=tokens  # Pass clinic-specific design tokens
+        print(f"🎨 Generating PDF with React components...")
+        pdf_buffer = await generate_consultation_pdf(
+            form_schema=form_schema,
+            form_data=form_data,
+            patient_info=patient_info,
+            appointment_info=appointment_info,
+            clinic_branding=clinic_branding
         )
 
         # Create safe filename
         patient_name = patient['name'].replace(' ', '_').replace('/', '_')
-        filename = f"consultation_{form_type}_{patient_name}_{appointment_id[:8]}.pdf"
+        date_str = appointment['scheduled_time'][:10] if appointment.get('scheduled_time') else 'unknown'
+        filename = f"consultation_{patient_name}_{date_str}.pdf"
 
         print(f"✅ PDF generated successfully: {filename}")
 
@@ -3736,6 +3715,429 @@ async def download_consultation_pdf(appointment_id: str):
         print(f"❌ Error generating PDF: {str(e)}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
+
+
+@app.get("/api/consultations/{consultation_id}/analysis-pdf")
+async def download_analysis_pdf(consultation_id: str):
+    """
+    Generate and download a PDF of the clinical analysis report using DoctorReportCard styling.
+    Uses headless browser (Playwright) to render React components as PDF.
+
+    Args:
+        consultation_id: UUID of the consultation
+
+    Returns:
+        StreamingResponse with PDF file
+
+    Raises:
+        400: Invalid consultation ID format
+        404: Consultation not found
+        500: PDF generation failed
+    """
+    try:
+        # Validate UUID format
+        try:
+            uuid.UUID(consultation_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid consultation ID format")
+
+        # Get Supabase client
+        supabase = get_supabase_client()
+
+        # Fetch consultation with all related data
+        print(f"📄 Fetching consultation data for PDF generation: {consultation_id}")
+
+        consultation_result = supabase.table("consultations")\
+            .select("*, appointment:appointments(*, patient:patients(*), doctor:doctors(*))")\
+            .eq("id", consultation_id)\
+            .execute()
+
+        if not consultation_result.data:
+            raise HTTPException(status_code=404, detail="Consultation not found")
+
+        consultation = consultation_result.data[0]
+        appointment = consultation['appointment']
+        patient = appointment['patient']
+
+        print(f"✅ Found consultation with {len(consultation.get('diagnoses', []))} diagnoses")
+
+        # Get clinic branding
+        from models.design_tokens import get_clinic_design_tokens
+
+        clinic_id = None
+        if appointment.get('doctor'):
+            # Try to get clinic_id from doctor record directly
+            clinic_id = appointment['doctor'].get('clinic_id')
+
+        clinic_branding = get_clinic_design_tokens(clinic_id, supabase) if clinic_id else None
+
+        # Prepare patient info
+        patient_info = {
+            "name": patient['name'],
+            "id": patient.get('id'),
+            "date_of_birth": patient.get('date_of_birth'),
+            "age": patient.get('age'),
+            "sex": patient.get('sex')
+        }
+
+        # Prepare appointment info
+        appointment_info = {
+            "id": appointment['id'],
+            "scheduled_time": appointment['scheduled_time'],
+            "doctor": {
+                "name": appointment['doctor']['name'] if appointment.get('doctor') else None
+            }
+        }
+
+        # Prepare consultation data
+        consultation_data = {
+            "id": consultation['id'],
+            "consultation_text": consultation.get('consultation_text', ''),
+            "original_transcript": consultation.get('original_transcript'),
+            "analysis_result": consultation.get('analysis_result'),
+            "diagnoses": consultation.get('diagnoses', []),
+            "guidelines_found": consultation.get('guidelines_found', []),
+            "summary_data": consultation.get('summary_data'),
+            "created_at": consultation.get('created_at', '')
+        }
+
+        # Generate PDF using headless browser
+        from pdf_generator_headless import generate_analysis_pdf
+
+        print(f"🎨 Generating analysis PDF with React components...")
+        pdf_buffer = await generate_analysis_pdf(
+            consultation_data=consultation_data,
+            patient_info=patient_info,
+            appointment_info=appointment_info,
+            clinic_branding=clinic_branding
+        )
+
+        # Create safe filename
+        patient_name = patient['name'].replace(' ', '_').replace('/', '_')
+        date_str = consultation.get('created_at', '')[:10] if consultation.get('created_at') else 'unknown'
+        filename = f"analysis_{patient_name}_{date_str}.pdf"
+
+        print(f"✅ Analysis PDF generated successfully: {filename}")
+
+        # Return as streaming response
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating analysis PDF: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate analysis PDF: {str(e)}")
+
+
+@app.get("/api/consultations/{consultation_id}/prescription-pdf")
+async def download_prescription_pdf(consultation_id: str):
+    """
+    Generate and download a prescription PDF for a consultation.
+    Uses ReportLab to render a professional prescription document with:
+    - Clinic branding and logo
+    - Patient information
+    - Medications list with dosage instructions
+    - Doctor signature watermark
+    - QR code for verification
+
+    Args:
+        consultation_id: UUID of the consultation
+
+    Returns:
+        StreamingResponse with PDF file
+
+    Raises:
+        400: Invalid consultation ID format
+        404: Consultation not found or no prescriptions available
+        500: PDF generation failed
+    """
+    try:
+        # Validate UUID format
+        try:
+            uuid.UUID(consultation_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid consultation ID format")
+
+        # Get Supabase client
+        supabase = get_supabase_client()
+
+        # Fetch consultation with prescriptions and related data
+        print(f"📋 Fetching consultation data for prescription PDF: {consultation_id}")
+
+        consultation_result = supabase.table("consultations")\
+            .select("*, appointment:appointments(*, patient:patients(*), doctor:doctors(*))")\
+            .eq("id", consultation_id)\
+            .execute()
+
+        if not consultation_result.data:
+            raise HTTPException(status_code=404, detail="Consultation not found")
+
+        consultation = consultation_result.data[0]
+        appointment = consultation.get('appointment')
+
+        if not appointment:
+            raise HTTPException(status_code=404, detail="Consultation has no linked appointment")
+
+        patient = appointment.get('patient')
+        if not patient:
+            raise HTTPException(status_code=404, detail="Appointment has no linked patient")
+
+        doctor = appointment.get('doctor') or {}
+
+        # Get prescriptions
+        prescriptions = consultation.get('prescriptions', [])
+        if prescriptions is None:
+            prescriptions = []
+
+        print(f"✅ Found consultation with {len(prescriptions)} prescriptions")
+
+        # Format consultation date
+        consultation_date = "Unknown"
+        if consultation.get('created_at'):
+            try:
+                dt = datetime.fromisoformat(consultation['created_at'].replace('Z', '+00:00'))
+                consultation_date = dt.strftime('%d/%m/%Y')
+            except:
+                consultation_date = consultation['created_at'][:10]
+        elif appointment.get('scheduled_time'):
+            try:
+                dt = datetime.fromisoformat(appointment['scheduled_time'].replace('Z', '+00:00'))
+                consultation_date = dt.strftime('%d/%m/%Y')
+            except:
+                consultation_date = appointment['scheduled_time'][:10]
+
+        # Prepare patient info
+        patient_info = {
+            "name": patient.get('name', 'Unknown Patient'),
+            "id": patient.get('id'),
+            "date_of_birth": patient.get('date_of_birth'),
+            "age_years": patient.get('age_years'),
+            "sex": patient.get('sex')
+        }
+
+        # Prepare doctor info
+        doctor_info = {
+            "name": doctor.get('name', 'Doctor'),
+            "qualifications": doctor.get('qualifications'),
+            "license_number": doctor.get('license_number'),
+            "clinic_name": doctor.get('clinic_name'),
+            "clinic_logo_url": doctor.get('clinic_logo_url'),
+            "clinic_address": doctor.get('clinic_address'),
+            "clinic_phone": doctor.get('clinic_phone')
+        }
+
+        # Generate PDF using ReportLab
+        from pdf_generator import generate_prescription_pdf
+
+        print(f"💊 Generating prescription PDF...")
+        print(f"   - Patient: {patient_info.get('name')}")
+        print(f"   - Doctor: {doctor_info.get('name')}")
+        print(f"   - Prescriptions: {len(prescriptions)}")
+        print(f"   - Date: {consultation_date}")
+
+        try:
+            pdf_buffer = generate_prescription_pdf(
+                prescriptions=prescriptions,
+                patient=patient_info,
+                doctor_info=doctor_info,
+                consultation_id=consultation_id,
+                consultation_date=consultation_date
+            )
+        except Exception as pdf_error:
+            print(f"❌ PDF generation error: {pdf_error}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(pdf_error)}")
+
+        # Create safe filename
+        patient_name = patient.get('name', 'patient').replace(' ', '_').replace('/', '_')
+        date_str = consultation_date.replace('/', '-')
+        filename = f"prescription_{patient_name}_{date_str}.pdf"
+
+        print(f"✅ Prescription PDF generated successfully: {filename}")
+
+        # Return as streaming response
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating prescription PDF: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate prescription PDF: {str(e)}")
+
+
+@app.get("/api/test/doctor-report-card-pdf")
+async def test_doctor_report_card_pdf():
+    """
+    Test endpoint to render DoctorReportCard component (with sample data) to PDF.
+    This verifies the component renders correctly before integrating form data.
+    """
+    from pdf_generator_headless import generate_pdf_from_react, build_html_for_doctor_report_card
+
+    try:
+        # Build HTML that renders DoctorReportCard with its built-in sample data
+        html_content = build_html_for_doctor_report_card()
+
+        # Generate PDF
+        pdf_buffer = await generate_pdf_from_react(
+            html_content=html_content,
+            pdf_options={"format": "A4", "landscape": False}
+        )
+
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=doctor-report-card-test.pdf"}
+        )
+
+    except Exception as e:
+        print(f"❌ Error generating DoctorReportCard test PDF: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate DoctorReportCard test PDF: {str(e)}")
+
+
+@app.post("/api/test/doctor-report-card-pdf-with-data")
+async def test_doctor_report_card_pdf_with_data(request: dict):
+    """
+    Test endpoint to render DoctorReportCard with custom data.
+
+    Request body:
+    {
+        "patientData": {...},
+        "pregnancyHistory": [...]
+    }
+    """
+    from pdf_generator_headless import generate_pdf_from_react, build_html_for_doctor_report_card_with_data
+
+    try:
+        patient_data = request.get('patientData', {})
+        pregnancy_history = request.get('pregnancyHistory', [])
+
+        print(f"📋 Testing PDF with custom data:")
+        print(f"   Patient: {patient_data.get('patientName', 'Unknown')}")
+        print(f"   Pregnancy records: {len(pregnancy_history)}")
+
+        html_content = build_html_for_doctor_report_card_with_data(
+            patient_data=patient_data,
+            pregnancy_history=pregnancy_history
+        )
+
+        pdf_buffer = await generate_pdf_from_react(
+            html_content=html_content,
+            pdf_options={"format": "A4", "landscape": False}
+        )
+
+        filename = f"test-custom-data-{patient_data.get('patientId', 'unknown')}.pdf"
+
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except Exception as e:
+        print(f"❌ Error generating test PDF with custom data: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate test PDF: {str(e)}")
+
+
+@app.get("/api/appointments/{appointment_id}/doctor-report-card-pdf")
+async def generate_doctor_report_card_pdf(appointment_id: str):
+    """
+    Generate DoctorReportCard PDF from appointment's consultation form data.
+
+    Workflow:
+    1. Fetch appointment with patient and form data
+    2. Transform form JSONB to DoctorReportCard format
+    3. Generate PDF using Playwright
+    4. Return PDF as streaming response
+    """
+    from pdf_generator_headless import generate_pdf_from_react, build_html_for_doctor_report_card_with_data
+    from pdf_data_transformer import transform_form_to_doctor_report_card
+
+    try:
+        # Fetch appointment with patient and consultation form
+        appointment_result = supabase.table("appointments")\
+            .select("""
+                *,
+                patient:patients(*),
+                consultation_form:consultation_form_forms(*)
+            """)\
+            .eq("id", appointment_id)\
+            .execute()
+
+        if not appointment_result.data:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+
+        appointment = appointment_result.data[0]
+
+        # Check if consultation form exists
+        if not appointment.get('consultation_form'):
+            raise HTTPException(
+                status_code=404,
+                detail="No consultation form found for this appointment"
+            )
+
+        # Extract data
+        patient_info = appointment['patient']
+        form_data = appointment['consultation_form']['consultation_form_data']
+        form_type = appointment['consultation_form'].get('form_type', 'antenatal')
+
+        # Transform to DoctorReportCard format
+        transformed_data = transform_form_to_doctor_report_card(
+            form_data=form_data,
+            patient_info=patient_info,
+            appointment_info=appointment,
+            form_type=form_type
+        )
+
+        # Build HTML with real data
+        html_content = build_html_for_doctor_report_card_with_data(
+            patient_data=transformed_data['patientData'],
+            pregnancy_history=transformed_data['pregnancyHistory']
+        )
+
+        # Generate PDF
+        pdf_buffer = await generate_pdf_from_react(
+            html_content=html_content,
+            pdf_options={"format": "A4", "landscape": False}
+        )
+
+        # Generate filename
+        patient_name = patient_info.get('name', 'Patient').replace(' ', '_')
+        filename = f"doctor_report_card_{patient_name}_{appointment_id[:8]}.pdf"
+
+        print(f"✅ DoctorReportCard PDF generated: {filename}")
+
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error generating DoctorReportCard PDF: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate DoctorReportCard PDF: {str(e)}"
+        )
 
 
 # ============================================================================

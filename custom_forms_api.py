@@ -510,6 +510,7 @@ async def preview_pdf(request: PreviewPDFRequest):
     """
     Generate a preview PDF based on the form schema and PDF template.
     Shows sample/dummy data for layout review before form is activated.
+    Uses the same React/Headless rendering as consultation PDFs for consistency.
 
     Args:
         request: PreviewPDFRequest with form schema, PDF template, and optional branding
@@ -519,7 +520,8 @@ async def preview_pdf(request: PreviewPDFRequest):
     """
     try:
         from fastapi.responses import StreamingResponse
-        from pdf_generator import generate_custom_form_pdf, generate_sample_form_data
+        from pdf_generator import generate_sample_form_data
+        from pdf_generator_headless import generate_consultation_pdf
 
         print(f"\n📄 Generating preview PDF for form: {request.form_name}")
 
@@ -530,33 +532,44 @@ async def preview_pdf(request: PreviewPDFRequest):
         )
         print(f"✅ Generated sample data for {len(sample_data)} sections")
 
-        # Prepare doctor info for header
-        doctor_info = None
-        if request.clinic_name or request.clinic_logo_url:
-            doctor_info = {
-                'clinic_name': request.clinic_name,
-                'clinic_logo_url': request.clinic_logo_url
-            }
-            print(f"   Clinic: {request.clinic_name or 'No name'}")
-            print(f"   Logo: {'Yes' if request.clinic_logo_url else 'No'}")
+        # Prepare clinic branding
+        clinic_branding = {
+            "clinic_name": request.clinic_name or "Preview Clinic",
+            "logo_url": request.clinic_logo_url,
+            "primary_color": request.primary_color or "#0c3555",
+            "accent_color": request.accent_color or "#1d9e99",
+            "background_color": "#f6f5ee"
+        }
+        print(f"   Clinic: {clinic_branding['clinic_name']}")
+        print(f"   Logo: {'Yes' if clinic_branding['logo_url'] else 'No'}")
 
-        # Generate PDF using shared function with sample data and custom colors
-        pdf_buffer = generate_custom_form_pdf(
-            form_data=sample_data,
-            pdf_template=request.pdf_template,
-            form_name=request.form_name,
-            specialty="preview",
-            patient=None,  # No patient info for preview
-            doctor_info=doctor_info,
+        # Create preview patient info (sample data for layout preview)
+        preview_patient_info = {
+            "name": "Sample Patient",
+            "age": "35",
+            "gender": "Female",
+            "mrn": "PREVIEW-001"
+        }
+
+        # Create preview appointment info
+        from datetime import datetime
+        preview_appointment_info = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "time": datetime.now().strftime("%H:%M"),
+            "form_name": request.form_name,
+            "specialty": "preview"
+        }
+
+        # Generate PDF using shared headless React function (same as consultation)
+        pdf_buffer = await generate_consultation_pdf(
             form_schema=request.form_schema,
-            # Pass custom colors
-            primary_color=request.primary_color,
-            accent_color=request.accent_color,
-            text_color=request.text_color,
-            light_gray_color=request.light_gray_color
+            form_data=sample_data,
+            patient_info=preview_patient_info,
+            appointment_info=preview_appointment_info,
+            clinic_branding=clinic_branding
         )
 
-        print(f"✅ Preview PDF generated successfully")
+        print(f"✅ Preview PDF generated successfully (using headless React renderer)")
 
         # Return as inline PDF for viewing
         filename = f"{request.form_name}_preview.pdf"
@@ -591,10 +604,6 @@ async def preview_saved_form_pdf(
         PDF file as downloadable response
     """
     from fastapi.responses import StreamingResponse
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.colors import HexColor
-    from reportlab.lib.units import cm
 
     try:
         # Verify Firebase authentication
@@ -610,8 +619,23 @@ async def preview_saved_form_pdf(
 
         form = response.data[0]
 
-        # Verify user owns this form
-        if form['created_by'] != user_id:
+        # Verify user owns this form OR has adopted it
+        has_permission = form['created_by'] == user_id
+
+        if not has_permission:
+            # Get doctor's UUID from Firebase user_id
+            doctor_result = supabase.table("doctors").select("id").eq("user_id", user_id).single().execute()
+
+            if doctor_result.data:
+                doctor_id = doctor_result.data.get('id')
+                # Check if user has adopted this form
+                adoption_check = supabase.table("doctor_adopted_forms").select("id").eq(
+                    "doctor_id", doctor_id
+                ).eq("form_id", form_id).execute()
+
+                has_permission = adoption_check.data and len(adoption_check.data) > 0
+
+        if not has_permission:
             raise HTTPException(status_code=403, detail="You don't have permission to preview this form")
 
         # Extract schema and pdf_template
