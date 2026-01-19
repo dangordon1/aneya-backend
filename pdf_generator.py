@@ -1164,7 +1164,7 @@ def render_custom_form_section(
             if is_table:
                 # Render table field with headers and rows
                 y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y,
-                                      primary_color=primary_color, text_color=text_color, light_gray_color=light_gray_color)
+                                      tokens=tokens)
 
                 # Check if table was landscape (returns -1 to force page break)
                 if y < 0:
