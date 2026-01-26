@@ -4095,7 +4095,7 @@ async def generate_doctor_report_card_pdf(appointment_id: str):
         # Extract data
         patient_info = appointment['patient']
         form_data = appointment['consultation_form']['consultation_form_data']
-form_type = appointment['consultation_form'].get('form_type', appointment.get('specialty', 'general'))
+        form_type = appointment['consultation_form'].get('form_type', appointment.get('specialty', 'general'))
 
         # Transform to DoctorReportCard format
         transformed_data = transform_form_to_doctor_report_card(
