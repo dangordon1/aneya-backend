@@ -4095,7 +4095,7 @@ async def generate_doctor_report_card_pdf(appointment_id: str):
         # Extract data
         patient_info = appointment['patient']
         form_data = appointment['consultation_form']['consultation_form_data']
-        form_type = appointment['consultation_form'].get('form_type', 'antenatal')
+        form_type = appointment['consultation_form'].get('form_type', appointment.get('specialty', 'general'))
 
         # Transform to DoctorReportCard format
         transformed_data = transform_form_to_doctor_report_card(
@@ -5899,10 +5899,22 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         # Step 1: Parse diarized segments
         diarized_segments = parse_diarized_transcript(request.original_transcript)
 
+        # Step 1b: Fetch doctor specialty from appointment
+        doctor_specialty = 'general'  # Default fallback
+        try:
+            appointment_result = supabase.table('appointments').select('specialty').eq('id', request.appointment_id).single().execute()
+            if appointment_result.data and appointment_result.data.get('specialty'):
+                doctor_specialty = appointment_result.data['specialty']
+                print(f"📋 Doctor specialty from appointment: {doctor_specialty}")
+            else:
+                print(f"⚠️ No specialty found for appointment {request.appointment_id}, using default: {doctor_specialty}")
+        except Exception as e:
+            print(f"⚠️ Failed to fetch appointment specialty: {e}, using default: {doctor_specialty}")
+
         # Step 2: Determine consultation type using existing endpoint function
         type_request = DetermineConsultationTypeRequest(
             diarized_segments=diarized_segments,
-            doctor_specialty='obgyn',
+            doctor_specialty=doctor_specialty,
             patient_context={
                 'patient_id': request.patient_id,
                 'consultation_id': request.consultation_id
@@ -6102,7 +6114,7 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         # Return error but don't raise (don't block re-summarize)
         return AutoFillConsultationFormResponse(
             success=False,
-            consultation_type='obgyn',
+            consultation_type='general',
             confidence=0.0,
             reasoning='Error occurred during form auto-fill',
             form_id='',
