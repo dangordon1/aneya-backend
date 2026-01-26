@@ -33,19 +33,42 @@ except ImportError:
 
 
 
+def _flatten_value(value: Any) -> str:
+    """
+    Recursively flatten any nested objects/dicts into a string.
+    Prevents React error #31 (objects not valid as React child).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        # Flatten each item and join
+        return ", ".join(_flatten_value(item) for item in value)
+    if isinstance(value, dict):
+        # Convert dict to key: value string
+        parts = []
+        for k, v in value.items():
+            flat_v = _flatten_value(v)
+            parts.append(f"{k}: {flat_v}")
+        return "; ".join(parts)
+    return str(value)
+
+
 def generate_sample_form_data(
-    form_schema: Dict[str, Any],
-    pdf_template: Dict[str, Any]
+    form_schema: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
     Generate realistic sample/dummy data based on form schema for PDF preview.
 
     Args:
         form_schema: Form schema with sections and field definitions
-        pdf_template: PDF template configuration
 
     Returns:
         Dict with nested structure: {"section_name": {"field_name": "sample value"}}
+        All values are guaranteed to be strings to prevent React rendering errors.
     """
     import random
 
@@ -63,7 +86,27 @@ def generate_sample_form_data(
         section_data = {}
         fields = section_config.get('fields', [])
 
-        for field in fields:
+        # Handle both list and dict field formats
+        if isinstance(fields, dict):
+            # Dict format: {"field_name": {config}}
+            field_items = [{"name": k, **v} if isinstance(v, dict) else {"name": k, "value": v} for k, v in fields.items()]
+        elif isinstance(fields, list):
+            # List format: [{"name": "field_name", ...}]
+            field_items = fields
+        else:
+            field_items = []
+
+        # If no 'fields' key, check if section keys are field definitions
+        if not field_items and 'fields' not in section_config:
+            # Treat section keys as field definitions (skip metadata keys)
+            metadata_keys = {'title', 'description', 'type', 'version'}
+            field_items = [
+                {"name": k, **v} if isinstance(v, dict) else {"name": k, "value": v}
+                for k, v in section_config.items()
+                if k not in metadata_keys
+            ]
+
+        for field in field_items:
             field_name = field.get('name', '')
             field_type = field.get('type', 'string')
             input_type = field.get('input_type', '')
@@ -169,6 +212,38 @@ def generate_sample_form_data(
             elif input_type == 'textarea':
                 section_data[field_name] = "Sample longer text content that would typically be entered in a textarea field. This demonstrates how multi-line text appears in the PDF."
 
+            elif field_type == 'object':
+                # Object field - generate flat string representation of nested fields
+                # This prevents React error #31 (objects not valid as React child)
+                nested_fields = field.get('properties', field.get('fields', []))
+                if isinstance(nested_fields, list):
+                    # Generate sample values for each nested field
+                    nested_values = []
+                    for nf in nested_fields:
+                        nf_name = nf.get('name', nf.get('label', 'field'))
+                        nf_type = nf.get('type', 'string')
+                        if nf_type == 'date':
+                            nested_values.append(f"{nf_name}: {datetime.now().strftime('%d/%m/%Y')}")
+                        elif nf_type == 'boolean':
+                            nested_values.append(f"{nf_name}: Yes")
+                        else:
+                            nested_values.append(f"{nf_name}: Sample value")
+                    section_data[field_name] = "; ".join(nested_values) if nested_values else "N/A"
+                elif isinstance(nested_fields, dict):
+                    # Handle dict-style properties
+                    nested_values = []
+                    for nf_name, nf_config in nested_fields.items():
+                        nf_type = nf_config.get('type', 'string') if isinstance(nf_config, dict) else 'string'
+                        if nf_type == 'date':
+                            nested_values.append(f"{nf_name}: {datetime.now().strftime('%d/%m/%Y')}")
+                        elif nf_type == 'boolean':
+                            nested_values.append(f"{nf_name}: Yes")
+                        else:
+                            nested_values.append(f"{nf_name}: Sample value")
+                    section_data[field_name] = "; ".join(nested_values) if nested_values else "N/A"
+                else:
+                    section_data[field_name] = "N/A"
+
             else:
                 # Default to sample text
                 section_data[field_name] = "Sample text"
@@ -177,7 +252,117 @@ def generate_sample_form_data(
         if section_data:
             sample_data[section_name] = section_data
 
-    return sample_data
+    # Final pass: DEEP flatten everything to ensure no nested objects remain
+    # This prevents React error #31 (objects not valid as React child)
+    def deep_flatten_data(data: Any, depth: int = 0) -> Any:
+        """Recursively ensure all values are React-safe (strings or flat arrays of dicts with string values)."""
+        if depth > 10:  # Safety limit
+            return str(data)
+
+        if data is None:
+            return ""
+        if isinstance(data, str):
+            return data
+        if isinstance(data, (int, float, bool)):
+            return str(data)
+        if isinstance(data, list):
+            # For lists, flatten each item
+            result = []
+            for item in data:
+                if isinstance(item, dict):
+                    # Flatten all values in the dict
+                    result.append({k: _flatten_value(v) for k, v in item.items()})
+                else:
+                    result.append(_flatten_value(item))
+            return result
+        if isinstance(data, dict):
+            # Check if this looks like section data (dict of field_name: value)
+            # If any value is itself a dict (not a list of dicts), flatten it
+            result = {}
+            for key, val in data.items():
+                if isinstance(val, dict):
+                    # Nested dict - flatten to string
+                    result[key] = _flatten_value(val)
+                elif isinstance(val, list):
+                    # List - process each item
+                    result[key] = deep_flatten_data(val, depth + 1)
+                else:
+                    result[key] = _flatten_value(val)
+            return result
+        return str(data)
+
+    # Apply deep flattening to all sections
+    flattened_data = {}
+    for section_name, section_data in sample_data.items():
+        flattened_data[section_name] = deep_flatten_data(section_data)
+
+    # FINAL SAFETY: Absolute last-resort flattening to prevent React error #31
+    def ensure_no_nested_objects(data: Any) -> Any:
+        """Last-resort flattening - convert ANY remaining nested object to string."""
+        if data is None:
+            return ""
+        if isinstance(data, str):
+            return data
+        if isinstance(data, (int, float, bool)):
+            return str(data)
+        if isinstance(data, list):
+            result = []
+            for item in data:
+                if isinstance(item, dict):
+                    # Ensure all values in dict are strings (not nested objects)
+                    flat_item = {}
+                    for k, v in item.items():
+                        if isinstance(v, (dict, list)):
+                            flat_item[k] = _flatten_value(v)
+                        elif isinstance(v, (int, float, bool)):
+                            flat_item[k] = str(v)
+                        elif v is None:
+                            flat_item[k] = ""
+                        else:
+                            flat_item[k] = str(v)
+                    result.append(flat_item)
+                elif isinstance(item, (dict, list)):
+                    result.append(_flatten_value(item))
+                else:
+                    result.append(str(item) if item is not None else "")
+            return result
+        if isinstance(data, dict):
+            result = {}
+            for key, val in data.items():
+                if isinstance(val, list):
+                    result[key] = ensure_no_nested_objects(val)
+                elif isinstance(val, dict):
+                    # Dict value that's NOT a list - must be flattened to string
+                    result[key] = _flatten_value(val)
+                elif isinstance(val, (int, float, bool)):
+                    result[key] = str(val)
+                elif val is None:
+                    result[key] = ""
+                else:
+                    result[key] = str(val)
+            return result
+        return str(data)
+
+    # Apply the absolute final safety flattening
+    safe_data = {}
+    for section_name, section_data in flattened_data.items():
+        safe_data[section_name] = ensure_no_nested_objects(section_data)
+
+    # Debug: Print flattened data structure to verify
+    print(f"   📋 Sample data structure after flattening:")
+    for section_name, section_data in safe_data.items():
+        if isinstance(section_data, dict):
+            for field_name, value in section_data.items():
+                val_type = type(value).__name__
+                if isinstance(value, list) and value:
+                    print(f"      - {section_name}.{field_name}: list[{len(value)}] of {type(value[0]).__name__}")
+                elif isinstance(value, dict):
+                    print(f"      ⚠️ {section_name}.{field_name}: DICT with keys {list(value.keys())} - THIS SHOULD NOT HAPPEN!")
+                else:
+                    preview = str(value)[:30] + "..." if len(str(value)) > 30 else str(value)
+                    print(f"      - {section_name}.{field_name}: {val_type}")
+
+    return safe_data
 
 
 def format_field_label(field_name: str) -> str:
@@ -463,846 +648,6 @@ def render_patient_section(c: canvas.Canvas, patient: Dict[str, Any], y: float) 
     return y
 
 
-def render_form_data_section(c: canvas.Canvas, form_data: Dict[str, Any], form_type: str, y: float) -> float:
-    """Render consultation form data based on form type"""
-    width, height = A4
-
-    y = render_section_header(c, f"Consultation Form ({form_type.upper()})", y)
-
-    # Check if we need a new page
-    if y < 5*cm:
-        c.showPage()
-        y = height - 2*cm
-        y = render_section_header(c, f"Consultation Form ({form_type.upper()}) - Continued", y)
-
-    # Render nested JSONB data
-    for section_key, section_value in form_data.items():
-        # Check if need new page
-        if y < 3*cm:
-            c.showPage()
-            y = height - 2*cm
-
-        if isinstance(section_value, dict):
-            # Nested section (e.g., "vital_signs", "physical_exam")
-            c.setFillColor(ANEYA_TEAL)
-            c.setFont("Helvetica-Bold", 12)
-            c.drawString(2.5*cm, y, format_field_label(section_key))
-            y -= 0.5*cm
-
-            for field_key, field_value in section_value.items():
-                if field_value is not None and field_value != '' and field_value != []:
-                    y = render_field(c, format_field_label(field_key), field_value, y, x_offset=3*cm)
-
-                    # Check if need new page
-                    if y < 3*cm:
-                        c.showPage()
-                        y = height - 2*cm
-
-            y -= 0.4*cm
-        elif isinstance(section_value, list):
-            # List field (e.g., diagnoses)
-            if section_value:  # Only render if not empty
-                c.setFillColor(ANEYA_TEAL)
-                c.setFont("Helvetica-Bold", 11)
-                c.drawString(2.5*cm, y, format_field_label(section_key))
-                y -= 0.4*cm
-
-                for item in section_value:
-                    if isinstance(item, dict):
-                        # Render each dict item
-                        for k, v in item.items():
-                            if v:
-                                y = render_field(c, format_field_label(k), v, y, x_offset=3*cm)
-                    else:
-                        # Simple list item
-                        c.setFillColor(ANEYA_GRAY)
-                        c.setFont("Helvetica", 10)
-                        c.drawString(3*cm, y, f"• {str(item)}")
-                        y -= 0.4*cm
-
-                y -= 0.4*cm
-        else:
-            # Top-level field
-            if section_value is not None and section_value != '':
-                y = render_field(c, format_field_label(section_key), section_value, y, x_offset=2.5*cm)
-
-    return y
-
-
-def generate_consultation_pdf(
-    appointment: Dict[str, Any],
-    patient: Dict[str, Any],
-    form_data: Dict[str, Any],
-    form_type: str = 'consultation_form',
-    doctor_info: Optional[Dict[str, Any]] = None
-) -> BytesIO:
-    """
-    Generate a PDF consultation report.
-
-    Args:
-        appointment: dict with appointment details
-        patient: dict with patient information
-        form_data: dict with consultation form JSONB data
-        form_type: str indicating form type ('consultation_form', 'obgyn', 'infertility', 'antenatal')
-        doctor_info: Optional dict with clinic_name and clinic_logo_url for header rendering
-
-    Returns:
-        BytesIO containing PDF bytes
-    """
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-
-    # Track Y position
-    y = height - 2*cm
-
-    # Render sections
-    y = render_header(c, y, doctor_info)
-    y = render_appointment_section(c, appointment, patient, y)
-
-    # Check if need new page before patient section
-    if y < 8*cm:
-        c.showPage()
-        y = height - 2*cm
-
-    y = render_patient_section(c, patient, y)
-
-    # Check if need new page before form data
-    if y < 8*cm:
-        c.showPage()
-        y = height - 2*cm
-
-    y = render_form_data_section(c, form_data, form_type, y)
-
-    # Add footer on last page
-    c.setFillColor(ANEYA_LIGHT_GRAY)
-    c.setFont("Helvetica", 8)
-    c.drawCentredString(width/2, 1.5*cm, "Aneya Healthcare Platform")
-    c.drawCentredString(width/2, 1*cm, "This document is confidential and for medical professionals only")
-
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-
-def render_table_field(
-    c: canvas.Canvas,
-    section_id: str,
-    field_name: str,
-    label: str,
-    schema_field: Dict[str, Any],
-    form_data: Dict[str, Any],
-    y: float,
-    tokens: Optional[DesignTokens] = None
-) -> float:
-    """
-    Render a table/array field with headers and rows.
-    Handles landscape orientation and column wrapping automatically.
-
-    Args:
-        c: ReportLab canvas
-        section_id: Section ID
-        field_name: Field name
-        label: Field label for display
-        schema_field: Field schema definition
-        form_data: Form data
-        y: Current Y position
-        tokens: Design tokens for styling
-
-    Returns:
-        Updated Y position
-    """
-    if tokens is None:
-        tokens = DesignTokens.default()
-
-    colors_dict = tokens.colors.to_hex_colors()
-    typo = tokens.typography
-    spacing = tokens.spacing
-
-    from reportlab.platypus import Table, TableStyle, Paragraph
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import landscape
-
-    width, height = A4
-
-    # Get row_fields from schema
-    row_fields = schema_field.get('row_fields', [])
-    if not row_fields:
-        # No row fields defined, skip table
-        return y
-
-    # Check if this is a transposed table with row headers
-    is_transposed = schema_field.get('input_type', '').endswith('transposed')
-    row_names = schema_field.get('row_names', [])
-
-    if is_transposed and row_names:
-        # Transposed table: rows are field names, columns are scan types
-        # We'll build column headers after we know how many scans we have
-        column_names = ['']  # Start with empty cell for row header column
-
-        # Initial col_widths estimate (will be recalculated later based on actual scan count)
-        # Assume 3 scans for initial landscape check
-        col_widths = [3.5*cm, 2.2*cm, 2.2*cm, 2.2*cm]
-    else:
-        # Regular table: columns are field names
-        column_names = [rf.get('label', rf.get('name', '')) for rf in row_fields]
-
-        # Calculate column widths based on field types
-        col_types = {rf.get('label', rf.get('name', '')): rf.get('type', 'string') for rf in row_fields}
-        col_widths = []
-
-        for col_name in column_names:
-            if col_types.get(col_name) == 'boolean':
-                col_widths.append(0.9*cm)
-            elif col_types.get(col_name) == 'number' or 'No.' in col_name or 'Year' in col_name or 'Wt' in col_name or 'SFH' in col_name or 'FHR' in col_name:
-                col_widths.append(1.2*cm)
-            elif 'Date' in col_name:
-                col_widths.append(1.6*cm)
-            else:
-                col_widths.append(2.2*cm)  # text default (reduced from 2.5cm)
-
-    # Calculate total table width
-    total_table_width = sum(col_widths)
-    portrait_available = width - 4*cm  # ~17cm for A4 portrait
-    landscape_available = landscape(A4)[0] - 2*cm  # ~27.7cm for A4 landscape (reduced margins)
-
-    # Determine if we need landscape orientation (will be rechecked for transposed tables)
-    needs_landscape = total_table_width > portrait_available
-
-    # Check if we need to split the table (too wide even for landscape)
-    needs_split = not is_transposed and total_table_width > landscape_available
-
-    # Debug logging
-    print(f"📊 Table: {label}")
-    print(f"   Total width: {total_table_width/cm:.2f}cm ({len(col_widths)} columns)")
-    print(f"   Portrait available: {portrait_available/cm:.2f}cm")
-    print(f"   Landscape available: {landscape_available/cm:.2f}cm")
-    print(f"   Needs landscape: {needs_landscape}")
-    print(f"   Needs split: {needs_split}")
-    print(f"   Is transposed: {is_transposed}")
-
-    if not is_transposed:  # Only switch now for regular tables
-        if needs_landscape or needs_split:
-            # Always create a new page for landscape tables
-            # (ReportLab cannot change page size of current page retroactively)
-            current_y = y
-            print(f"   Current y: {current_y/cm:.2f}cm, Page height: {A4[1]/cm:.2f}cm")
-            print(f"   → Switching to landscape (new page)")
-
-            c.showPage()
-            c.setPageSize(landscape(A4))
-            width, height = landscape(A4)
-            y = height - 2*cm
-            available_width = landscape_available
-            print(f"   Page size after switch: {c._pagesize[0]/cm:.2f}cm x {c._pagesize[1]/cm:.2f}cm")
-        else:
-            # Check for page break in portrait
-            if y < 8*cm:
-                c.showPage()
-                y = height - 2*cm
-            available_width = portrait_available
-
-    # Table title (skip if splitting, as each chunk will have its own title)
-    if not needs_split:
-        c.setFont("Helvetica-Bold", 10)
-        c.setFillColor(colors_dict["primary"])
-        left_margin = 1*cm if needs_landscape else 2*cm
-        c.drawString(left_margin, y, f"• {label}")
-        y -= 0.6*cm
-
-    # Get table data from form_data
-    table_data_raw = form_data.get(section_id, {}).get(field_name, [])
-    if not isinstance(table_data_raw, list):
-        table_data_raw = []
-
-    # Create paragraph styles for wrapping
-    header_style = ParagraphStyle(
-        'TableHeader',
-        fontName='Helvetica-Bold',
-        fontSize=7,
-        leading=8,
-        alignment=1  # Center
-    )
-
-    cell_style = ParagraphStyle(
-        'TableCell',
-        fontName='Helvetica',
-        fontSize=7,
-        leading=8,
-        alignment=0  # Left
-    )
-
-    # Build table data for PDF
-    table_data = []
-
-    if is_transposed and row_names:
-        # Transposed table: each row is a field, each column is a scan instance
-        # Limit to 5 scans (columns) if data exists, otherwise 3 empty columns
-        num_scans = min(len(table_data_raw), 5) if table_data_raw else 3
-
-        # Build column headers from scan data (scan_type field)
-        for i in range(num_scans):
-            if table_data_raw and i < len(table_data_raw):
-                scan_type = table_data_raw[i].get('scan_type', f'Scan {i+1}')
-                column_names.append(scan_type)
-            else:
-                column_names.append(f'Scan {i+1}')
-
-        # Recalculate column widths based on actual number of scans
-        col_widths = [3.5*cm] + [2.2*cm] * num_scans
-        total_table_width = sum(col_widths)
-        needs_landscape = total_table_width > portrait_available
-
-        # Re-check landscape if we recalculated
-        if needs_landscape and c.pagesize == A4:  # Not already in landscape
-            c.showPage()
-            c.setPageSize(landscape(A4))
-            width, height = landscape(A4)
-            y = height - 2*cm
-            available_width = landscape_available
-        elif not needs_landscape:
-            if y < 8*cm:
-                c.showPage()
-                y = height - 2*cm
-            available_width = portrait_available
-
-    # Header row with Paragraph wrapping for multi-word headers
-    header_paragraphs = [Paragraph(col if col else '', header_style) for col in column_names]
-    table_data.append(header_paragraphs)
-
-    if is_transposed and row_names:
-
-        # Build rows for each field (from row_names)
-        for row_label in row_names:
-            # Find the corresponding field in row_fields
-            field_def = None
-            for rf in row_fields:
-                if rf.get('label', '') == row_label or rf.get('name', '') == row_label.lower().replace('/', '_').replace(' ', '_'):
-                    field_def = rf
-                    break
-
-            # Start with row header
-            row_data = [Paragraph(row_label, ParagraphStyle('RowHeader', fontName='Helvetica-Bold', fontSize=7, leading=8))]
-
-            # Add data for each scan instance
-            if table_data_raw and field_def:
-                field_name_key = field_def.get('name', '')
-                for scan_idx in range(num_scans):
-                    if scan_idx < len(table_data_raw):
-                        value = table_data_raw[scan_idx].get(field_name_key, '')
-                        if value:
-                            # Wrap text in Paragraph for proper cell wrapping
-                            row_data.append(Paragraph(str(value), cell_style))
-                        else:
-                            row_data.append('')
-                    else:
-                        row_data.append('')
-            else:
-                # Empty columns
-                row_data.extend([''] * num_scans)
-
-            table_data.append(row_data)
-    else:
-        # Regular table: each row is a record
-        # Data rows (limit to 10 rows if filled, show 3 empty rows if empty)
-        if table_data_raw:
-            for row in table_data_raw[:10]:  # Limit to 10 rows
-                row_values = []
-                for rf in row_fields:
-                    field_name_in_row = rf.get('name', '')
-                    value = row.get(field_name_in_row, '')
-                    if value is None or value == '':
-                        row_values.append('')
-                    else:
-                        # Wrap text in Paragraph for proper cell wrapping
-                        row_values.append(Paragraph(str(value), cell_style))
-                table_data.append(row_values)
-        else:
-            # Show 3 empty rows as template
-            for i in range(3):
-                table_data.append([''] * len(column_names))
-
-    # Handle table splitting if needed
-    if needs_split:
-        # Split table into multiple landscape tables
-        # Always include first column (usually Date) in each split
-
-        # Calculate how many columns can fit per table
-        first_col_width = col_widths[0]
-        remaining_space = available_width - first_col_width
-
-        # Group remaining columns into chunks that fit
-        column_chunks = [[0]]  # Always start with column 0 (Date)
-        current_chunk = []
-        current_width = 0
-
-        for i in range(1, len(col_widths)):
-            if current_width + col_widths[i] <= remaining_space:
-                current_chunk.append(i)
-                current_width += col_widths[i]
-            else:
-                # Start new chunk
-                if current_chunk:
-                    column_chunks.append(current_chunk)
-                current_chunk = [i]
-                current_width = col_widths[i]
-
-        # Add last chunk
-        if current_chunk:
-            column_chunks.append(current_chunk)
-
-        # Render each chunk as a separate table
-        for chunk_idx, chunk in enumerate(column_chunks):
-            if chunk_idx > 0:  # Not the first chunk
-                # Add first column to this chunk
-                chunk_cols = [0] + chunk
-            else:
-                chunk_cols = chunk
-
-            # Build table for this chunk
-            chunk_table_data = []
-
-            # Header row
-            chunk_headers = [table_data[0][col_idx] for col_idx in chunk_cols]
-            chunk_table_data.append(chunk_headers)
-
-            # Data rows
-            for row_idx in range(1, len(table_data)):
-                chunk_row = [table_data[row_idx][col_idx] for col_idx in chunk_cols]
-                chunk_table_data.append(chunk_row)
-
-            # Column widths for this chunk
-            chunk_widths = [col_widths[col_idx] for col_idx in chunk_cols]
-
-            # Render table title (with part indicator for continuation, 1cm margin for landscape)
-            c.setFont("Helvetica-Bold", 10)
-            c.setFillColor(colors_dict["primary"])
-            if chunk_idx > 0:
-                c.drawString(1*cm, y, f"• {label} (continued - Part {chunk_idx + 1})")
-            else:
-                c.drawString(1*cm, y, f"• {label} (Part 1 of {len(column_chunks)})")
-            y -= 0.6*cm
-
-            # Create and render table
-            row_heights = [None] * len(chunk_table_data)
-            row_heights[0] = 0.8*cm
-
-            pdf_table = Table(chunk_table_data, colWidths=chunk_widths, rowHeights=row_heights)
-
-            table_style = [
-                ('BACKGROUND', (0, 0), (-1, 0), colors_dict["text_light"]),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors_dict["primary"]),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 7),
-                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors_dict["background_light"]]),
-                ('LEFTPADDING', (0, 0), (-1, -1), 3),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-                ('TOPPADDING', (0, 0), (-1, -1), 3),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-            ]
-            pdf_table.setStyle(TableStyle(table_style))
-
-            # Draw table (use 1cm margin for landscape)
-            table_width, table_height = pdf_table.wrap(available_width, height)
-            pdf_table.drawOn(c, 1*cm, y - table_height)
-            y -= (table_height + 0.5*cm)
-
-            # New page for next chunk (except last)
-            if chunk_idx < len(column_chunks) - 1:
-                c.showPage()
-                c.setPageSize(landscape(A4))
-                width, height = landscape(A4)
-                y = height - 2*cm
-
-        # Return -1 to force page break; next page will be portrait
-        return -1
-
-    # Single table (no splitting needed)
-    # Scale column widths if still too wide (shouldn't happen but just in case)
-    if total_table_width > available_width:
-        scale_factor = available_width / total_table_width
-        col_widths = [w * scale_factor for w in col_widths]
-
-    # Create table
-    row_heights = [None] * len(table_data)
-    row_heights[0] = 0.8*cm  # Taller header for wrapped text
-
-    pdf_table = Table(table_data, colWidths=col_widths, rowHeights=row_heights)
-
-    # Base table style
-    table_style = [
-        ('BACKGROUND', (0, 0), (-1, 0), colors_dict["text_light"]),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors_dict["primary"]),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 7),
-        ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-        ('ALIGN', (0, 1), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors_dict["background_light"]]),
-        ('LEFTPADDING', (0, 0), (-1, -1), 3),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-        ('TOPPADDING', (0, 0), (-1, -1), 3),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-    ]
-
-    # Additional styling for transposed tables with row headers
-    if is_transposed and row_names:
-        table_style.extend([
-            ('BACKGROUND', (0, 1), (0, -1), colors_dict["text_light"]),  # Row header column background
-            ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),  # Row header column bold
-            ('FONTSIZE', (0, 1), (0, -1), 7),
-            ('ALIGN', (0, 1), (0, -1), 'LEFT'),  # Row headers left-aligned
-            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),  # Data cells centered
-        ])
-
-    pdf_table.setStyle(TableStyle(table_style))
-
-    # Draw table (use 1cm margin for landscape, 2cm for portrait)
-    table_width, table_height = pdf_table.wrap(available_width, height)
-    left_margin = 1*cm if needs_landscape else 2*cm
-    pdf_table.drawOn(c, left_margin, y - table_height)
-    y -= (table_height + 0.5*cm)
-
-    # Return to portrait for next content if we were in landscape
-    if needs_landscape:
-        # Don't switch page size yet - wait until next page is created
-        # Return negative y to force page break on next content
-        return -1
-
-    return y
-
-
-def render_custom_form_section(
-    c: canvas.Canvas,
-    section_config: Dict[str, Any],
-    form_data: Dict[str, Any],
-    y: float,
-    form_schema: Optional[Dict[str, Any]] = None,
-    tokens: Optional[DesignTokens] = None
-) -> float:
-    """
-    Render a custom form section using pdf_template configuration.
-
-    Args:
-        c: ReportLab canvas
-        section_config: PDF template section configuration
-        form_data: Actual form data (JSONB)
-        y: Current Y position
-        form_schema: Optional form schema for table field rendering
-        tokens: Design tokens for styling
-
-    Returns:
-        float: Updated Y position
-    """
-    if tokens is None:
-        tokens = DesignTokens.default()
-
-    colors = tokens.colors.to_hex_colors()
-    typo = tokens.typography
-    spacing = tokens.spacing
-
-    width, height = A4
-
-    # Get section ID and title
-    section_id = section_config.get('id', '')
-    section_title = section_config.get('title', format_field_label(section_id))
-    layout = section_config.get('layout', 'single_column')
-
-    # Check for orphaned section header (need at least 3cm for header + content)
-    if y < 3*cm:
-        c.showPage()
-        y = height - 2*cm
-
-    # Render section header
-    y = render_section_header(c, section_title, y, tokens=tokens)
-
-    # Get fields for this section
-    fields = section_config.get('fields', [])
-
-    # Render fields based on layout
-    if layout == 'two_column':
-        # Two column layout
-        col_width = 8.5*cm
-        left_x = 2*cm
-        right_x = 11*cm
-        row_height = 0.5*cm
-
-        for i, field_config in enumerate(fields):
-            field_name = field_config.get('field_name', '')
-            label = field_config.get('label', format_field_label(field_name))
-
-            # Check if this is a table field by looking it up in schema
-            schema_field = None
-            if form_schema:
-                for schema_section_name, schema_section_data in form_schema.items():
-                    if isinstance(schema_section_data, dict) and 'fields' in schema_section_data:
-                        for f in schema_section_data['fields']:
-                            if f.get('name') == field_name:
-                                schema_field = f
-                                break
-                    if schema_field:
-                        break
-
-            is_table = schema_field and schema_field.get('type') == 'array' and schema_field.get('input_type', '').startswith('table')
-
-            if is_table:
-                # Render table field (spans full width, ignores columns)
-                y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y, tokens=tokens)
-
-                # Check if table was landscape (returns -1 to force page break)
-                if y < 0:
-                    c.showPage()
-                    c.setPageSize(A4)  # Switch back to portrait
-                    y = height - 2*cm
-            else:
-                # Regular field - get value from form_data
-                value = form_data.get(section_id, {}).get(field_name, '')
-
-                # Convert None to empty string for display
-                if value is None:
-                    value = ''
-
-                # Determine column
-                column = field_config.get('position', {}).get('column', 1)
-                x_offset = left_x if column == 1 else right_x
-
-                # Check for page break
-                if y < 3*cm:
-                    c.showPage()
-                    y = height - 2*cm
-                    y = render_section_header(c, f"{section_title} - Continued", y, tokens=tokens)
-
-                # Render field
-                y = render_field(c, label, value, y, x_offset=x_offset, tokens=tokens)
-
-    elif layout == 'three_column':
-        # Three column layout
-        col_width = 5.5*cm
-        col1_x = 2*cm
-        col2_x = 7.8*cm
-        col3_x = 13.6*cm
-
-        for field_config in fields:
-            field_name = field_config.get('field_name', '')
-            label = field_config.get('label', format_field_label(field_name))
-
-            # Check if this is a table field by looking it up in schema
-            schema_field = None
-            if form_schema:
-                for schema_section_name, schema_section_data in form_schema.items():
-                    if isinstance(schema_section_data, dict) and 'fields' in schema_section_data:
-                        for f in schema_section_data['fields']:
-                            if f.get('name') == field_name:
-                                schema_field = f
-                                break
-                    if schema_field:
-                        break
-
-            is_table = schema_field and schema_field.get('type') == 'array' and schema_field.get('input_type', '').startswith('table')
-
-            if is_table:
-                # Render table field (spans full width, ignores columns)
-                y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y, tokens=tokens)
-
-                # Check if table was landscape (returns -1 to force page break)
-                if y < 0:
-                    c.showPage()
-                    c.setPageSize(A4)  # Switch back to portrait
-                    y = height - 2*cm
-            else:
-                # Regular field - get value from form_data
-                value = form_data.get(section_id, {}).get(field_name, '')
-
-                # Convert None to empty string for display
-                if value is None:
-                    value = ''
-
-                # Determine column
-                column = field_config.get('position', {}).get('column', 1)
-                if column == 1:
-                    x_offset = col1_x
-                elif column == 2:
-                    x_offset = col2_x
-                else:
-                    x_offset = col3_x
-
-                # Check for page break
-                if y < 3*cm:
-                    c.showPage()
-                    y = height - 2*cm
-                    y = render_section_header(c, f"{section_title} - Continued", y, tokens=tokens)
-
-                # Render field
-                y = render_field(c, label, value, y, x_offset=x_offset, tokens=tokens)
-
-    else:
-        # Single column layout (default)
-        for field_config in fields:
-            field_name = field_config.get('field_name', '')
-            label = field_config.get('label', format_field_label(field_name))
-
-            # Check if this is a table field by looking it up in schema
-            schema_field = None
-            if form_schema:
-                for schema_section_name, schema_section_data in form_schema.items():
-                    if isinstance(schema_section_data, dict) and 'fields' in schema_section_data:
-                        for f in schema_section_data['fields']:
-                            if f.get('name') == field_name:
-                                schema_field = f
-                                break
-                    if schema_field:
-                        break
-
-            is_table = schema_field and schema_field.get('type') == 'array' and schema_field.get('input_type', '').startswith('table')
-
-            if is_table:
-                # Render table field with headers and rows
-                y = render_table_field(c, section_id, field_name, label, schema_field, form_data, y,
-                                      tokens=tokens)
-
-                # Check if table was landscape (returns -1 to force page break)
-                if y < 0:
-                    c.showPage()
-                    c.setPageSize(A4)  # Switch back to portrait
-                    y = height - 2*cm
-            else:
-                # Regular field
-                # Get value from form_data
-                value = form_data.get(section_id, {}).get(field_name, '')
-
-                # Convert None to empty string for display
-                if value is None:
-                    value = ''
-
-                # Check for page break
-                if y < 3*cm:
-                    c.showPage()
-                    y = height - 2*cm
-                    y = render_section_header(c, f"{section_title} - Continued", y, tokens=tokens)
-
-                # Render field
-                y = render_field(c, label, value, y, tokens=tokens)
-
-    y -= 0.6*cm
-    return y
-
-
-def generate_custom_form_pdf(
-    form_data: Dict[str, Any],
-    pdf_template: Dict[str, Any],
-    form_name: str,
-    specialty: str,
-    patient: Optional[Dict[str, Any]] = None,
-    doctor_info: Optional[Dict[str, Any]] = None,
-    form_schema: Optional[Dict[str, Any]] = None,
-    tokens: Optional[DesignTokens] = None
-) -> BytesIO:
-    """
-    Generate a PDF for a custom form using stored pdf_template.
-
-    Args:
-        form_data: Filled form data (JSONB from filled_forms table)
-        pdf_template: PDF layout template (JSONB from custom_forms table)
-        form_name: Name of the form
-        specialty: Medical specialty
-        patient: Optional patient information
-        doctor_info: Optional dict with clinic_name and clinic_logo_url
-        form_schema: Optional form schema for table rendering
-        tokens: Optional DesignTokens for styling (falls back to Aneya defaults)
-
-    Returns:
-        BytesIO containing PDF bytes
-    """
-    # Use provided tokens or default to Aneya styling
-    if tokens is None:
-        tokens = DesignTokens.default()
-
-    colors = tokens.colors.to_hex_colors()
-    typo = tokens.typography
-    spacing = tokens.spacing
-
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-
-    # Track Y position
-    y = height - 2*cm
-
-    # Get page config
-    page_config = pdf_template.get('page_config', {})
-    header_config = page_config.get('header', {})
-
-    # Render header
-    if header_config.get('show_logo') or header_config.get('show_clinic_name'):
-        y = render_header(c, y, doctor_info, tokens=tokens)
-    else:
-        # Simple header with form title
-        c.setFillColor(colors["primary"])
-        font_name, font_size = typo.heading_1.to_reportlab_font()
-        c.setFont(font_name, font_size)
-        form_title = header_config.get('title', format_field_label(form_name))
-        c.drawCentredString(width/2, y, form_title)
-        y -= spacing.field_spacing * cm
-
-        # Specialty subtitle
-        c.setFillColor(colors["text"])
-        font_name, font_size = typo.body.to_reportlab_font()
-        c.setFont(font_name, font_size + 2)  # Slightly larger for subtitle
-        c.drawCentredString(width/2, y, f"Specialty: {specialty.title()}")
-        y -= spacing.field_spacing * cm
-
-        # Generation date
-        font_name, font_size = typo.body.to_reportlab_font()
-        c.setFont(font_name, font_size)
-        generation_date = datetime.now().strftime('%d %B %Y at %H:%M')
-        c.drawCentredString(width/2, y, f"Generated: {generation_date}")
-        y -= spacing.section_spacing * cm
-
-    # Render patient section if provided
-    if patient:
-        if y < 8*cm:
-            c.showPage()
-            y = height - 2*cm
-
-        y = render_patient_section(c, patient, y)
-
-    # Render form sections using template
-    sections = pdf_template.get('sections', [])
-
-    for section_config in sections:
-        # Check for page break before section
-        if section_config.get('page_break_before', False):
-            c.showPage()
-            y = height - 2*cm
-
-        # Check if need new page
-        if y < 8*cm:
-            c.showPage()
-            y = height - 2*cm
-
-        # Render section
-        y = render_custom_form_section(c, section_config, form_data, y, form_schema, tokens=tokens)
-
-    # Add footer if configured
-    footer_config = page_config.get('footer', {})
-    if footer_config.get('show_page_numbers') or footer_config.get('show_timestamp'):
-        c.setFillColor(colors["text_light"])
-        font_name, font_size = typo.caption.to_reportlab_font()
-        c.setFont(font_name, font_size)
-        c.drawCentredString(width/2, 1.5*cm, "Aneya Healthcare Platform")
-        c.drawCentredString(width/2, 1*cm, "This document is confidential and for medical professionals only")
-
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-
 # ============================================================================
 # PRESCRIPTION PDF GENERATION
 # ============================================================================
@@ -1443,21 +788,21 @@ def render_prescription_header(
         logo_rendered = render_clinic_logo(c, y, doctor_info['clinic_logo_url'])
 
     # Clinic name (left side)
-    clinic_name = doctor_info.get('clinic_name', 'Medical Clinic')
+    clinic_name = doctor_info.get('clinic_name') or 'Medical Clinic'
     c.setFillColor(colors["primary"])
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(2*cm, y, clinic_name)
+    c.drawString(2*cm, y, str(clinic_name))
     y -= 0.6*cm
 
     # Clinic address if available
     if doctor_info.get('clinic_address'):
         c.setFillColor(colors["text"])
         c.setFont("Helvetica", 9)
-        c.drawString(2*cm, y, doctor_info['clinic_address'])
+        c.drawString(2*cm, y, str(doctor_info['clinic_address']))
         y -= 0.4*cm
 
     # Doctor name and credentials
-    doctor_name = doctor_info.get('name', 'Doctor')
+    doctor_name = doctor_info.get('name') or 'Doctor'
     c.setFillColor(colors["primary"])
     c.setFont("Helvetica-Bold", 11)
     c.drawString(2*cm, y, f"Dr. {doctor_name}")
@@ -1472,14 +817,14 @@ def render_prescription_header(
     if doctor_info.get('qualifications'):
         c.setFont("Helvetica", 9)
         c.setFillColor(colors["text"])
-        c.drawString(2*cm, y, doctor_info['qualifications'])
+        c.drawString(2*cm, y, str(doctor_info['qualifications']))
         y -= 0.4*cm
 
     # Registration number if available
     if doctor_info.get('license_number'):
         c.setFont("Helvetica", 9)
         c.setFillColor(colors["text"])
-        c.drawString(2*cm, y, f"Reg. No: {doctor_info['license_number']}")
+        c.drawString(2*cm, y, f"Reg. No: {str(doctor_info['license_number'])}")
         y -= 0.4*cm
 
     y -= 0.4*cm
@@ -1523,8 +868,8 @@ def render_prescription_patient_info(
 
     c.setFillColor(colors["text"])
     c.setFont("Helvetica", 11)
-    patient_name = patient.get('name', 'Unknown')
-    c.drawString(4.5*cm, y, patient_name)
+    patient_name = patient.get('name') or 'Unknown'
+    c.drawString(4.5*cm, y, str(patient_name))
 
     # Patient ID on right side if available
     if patient.get('id'):
@@ -1640,11 +985,11 @@ def render_medications_table(
 
     # Render each medication
     for idx, med in enumerate(prescriptions, 1):
-        drug_name = med.get('drug_name', 'Unknown medication')
-        amount = med.get('amount', '')
-        method = med.get('method', '')
-        frequency = med.get('frequency', '')
-        duration = med.get('duration', '')
+        drug_name = med.get('drug_name') or 'Unknown medication'
+        amount = med.get('amount') or ''
+        method = med.get('method') or ''
+        frequency = med.get('frequency') or ''
+        duration = med.get('duration') or ''
 
         # Check for page break
         if y < 4*cm:
@@ -1662,7 +1007,7 @@ def render_medications_table(
         # Drug name (bold)
         c.setFillColor(colors["primary"])
         c.setFont("Helvetica-Bold", 11)
-        c.drawString(col_x['drug'], y, drug_name)
+        c.drawString(col_x['drug'], y, str(drug_name))
 
         # Quantity
         if amount:
@@ -1720,7 +1065,7 @@ def render_prescription_footer(
     sig_y = 5*cm
 
     # Render signature watermark
-    doctor_name = doctor_info.get('name', 'Doctor')
+    doctor_name = doctor_info.get('name') or 'Doctor'
     render_signature_watermark(c, f"Dr. {doctor_name}", sig_x + 3*cm, sig_y + 1*cm, tokens)
 
     # Signature line
@@ -1736,11 +1081,11 @@ def render_prescription_footer(
     if doctor_info.get('qualifications'):
         c.setFillColor(colors["text"])
         c.setFont("Helvetica", 9)
-        c.drawCentredString(sig_x + 3*cm, sig_y - 1.4*cm, doctor_info['qualifications'])
+        c.drawCentredString(sig_x + 3*cm, sig_y - 1.4*cm, str(doctor_info['qualifications']))
 
     if doctor_info.get('license_number'):
         c.setFont("Helvetica", 9)
-        c.drawCentredString(sig_x + 3*cm, sig_y - 1.8*cm, f"Reg. No: {doctor_info['license_number']}")
+        c.drawCentredString(sig_x + 3*cm, sig_y - 1.8*cm, f"Reg. No: {str(doctor_info['license_number'])}")
 
     # QR code (left side)
     qr_url = f"https://aneya.health/consultations/{consultation_id}"
@@ -1762,11 +1107,11 @@ def render_prescription_footer(
 
     footer_parts = []
     if doctor_info.get('clinic_name'):
-        footer_parts.append(doctor_info['clinic_name'])
+        footer_parts.append(str(doctor_info['clinic_name']))
     if doctor_info.get('clinic_address'):
-        footer_parts.append(doctor_info['clinic_address'])
+        footer_parts.append(str(doctor_info['clinic_address']))
     if doctor_info.get('clinic_phone'):
-        footer_parts.append(f"Tel: {doctor_info['clinic_phone']}")
+        footer_parts.append(f"Tel: {str(doctor_info['clinic_phone'])}")
 
     if footer_parts:
         footer_text = " | ".join(footer_parts)

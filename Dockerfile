@@ -48,8 +48,14 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install additional fonts for Playwright (replacements for deprecated packages)
+RUN apt-get update && apt-get install -y \
+    fonts-unifont \
+    fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Playwright browsers (Chromium for PDF generation)
-RUN playwright install --with-deps chromium
+RUN playwright install chromium
 
 # Set Playwright environment variable
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/playwright
@@ -68,7 +74,7 @@ COPY tools/ ./tools/
 COPY models/ ./models/
 COPY migrations/ ./migrations/
 COPY historical_forms/ ./historical_forms/
-COPY static/ ./static/ 2>/dev/null || true
+COPY static/ ./static/
 
 # Create a non-root user
 RUN useradd -m -u 1000 aneya && chown -R aneya:aneya /app
