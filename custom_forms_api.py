@@ -84,7 +84,6 @@ class FormExtractionResponse(BaseModel):
     form_name: str
     specialty: str
     form_schema: Dict[str, Any]  # Extracted form schema (sections + fields)
-    pdf_template: Dict[str, Any]  # Extracted PDF layout
     patient_criteria: str = ""  # Required - AI-extracted description of which patients this form is for
     metadata: Dict[str, Any]  # Field counts, image count, etc.
     error: Optional[str] = None
@@ -95,7 +94,6 @@ class SaveFormRequest(BaseModel):
     form_name: str
     specialty: str
     form_schema: Dict[str, Any]
-    pdf_template: Dict[str, Any]
     description: Optional[str] = None
     patient_criteria: str  # Required - must specify which patients this form is for
     is_public: bool = False
@@ -233,14 +231,12 @@ async def upload_custom_form(
                 form_name=form_name,
                 specialty=specialty,
                 form_schema={},
-                pdf_template={},
                 metadata={},
                 error=result.error
             )
 
         print(f"✅ Conversion successful!")
         print(f"   Schema sections: {len(result.schema) if isinstance(result.schema, dict) else 'N/A'}")
-        print(f"   PDF template sections: {len(result.pdf_template.get('sections', [])) if result.pdf_template else 0}")
 
         # Extract patient_criteria from metadata
         patient_criteria = result.metadata.get('patient_criteria') if result.metadata else None
@@ -303,7 +299,6 @@ async def upload_custom_form(
             form_name=form_name,
             specialty=specialty,
             form_schema=result.schema,
-            pdf_template=result.pdf_template,
             patient_criteria=patient_criteria,
             metadata=result.metadata
         )
@@ -412,7 +407,6 @@ async def save_custom_form(
             "created_by": user_id,
             "is_public": request.is_public,
             "form_schema": request.form_schema,
-            "pdf_template": request.pdf_template,  # Save PDF template
             "description": request.description,
             "patient_criteria": request.patient_criteria,  # Save patient criteria for LLM form selector
             "field_count": field_count,
@@ -496,7 +490,6 @@ class PreviewPDFRequest(BaseModel):
     """Request body for PDF preview generation"""
     form_name: str
     form_schema: Dict[str, Any]
-    pdf_template: Dict[str, Any]
     clinic_logo_url: Optional[str] = None  # Optional clinic logo URL for header
     clinic_name: Optional[str] = None  # Optional clinic name for header
     primary_color: Optional[str] = None  # Primary brand color (defaults to Aneya Navy)
@@ -508,12 +501,12 @@ class PreviewPDFRequest(BaseModel):
 @router.post("/preview-pdf")
 async def preview_pdf(request: PreviewPDFRequest):
     """
-    Generate a preview PDF based on the form schema and PDF template.
+    Generate a preview PDF based on the form schema.
     Shows sample/dummy data for layout review before form is activated.
-    Uses the same React/Headless rendering as consultation PDFs for consistency.
+    Uses the React/Headless rendering for PDF generation.
 
     Args:
-        request: PreviewPDFRequest with form schema, PDF template, and optional branding
+        request: PreviewPDFRequest with form schema and optional branding
 
     Returns:
         StreamingResponse with PDF file for inline display
@@ -521,14 +514,29 @@ async def preview_pdf(request: PreviewPDFRequest):
     try:
         from fastapi.responses import StreamingResponse
         from pdf_generator import generate_sample_form_data
-        from pdf_generator_headless import generate_consultation_pdf
+        from pdf_generator_headless import generate_custom_form_pdf_headless
 
         print(f"\n📄 Generating preview PDF for form: {request.form_name}")
 
+        # DEBUG: Print incoming schema structure to compare with working schema
+        print(f"   🔍 DEBUG - Incoming schema structure:")
+        for section_name, section_config in list(request.form_schema.items())[:5]:
+            if isinstance(section_config, dict):
+                fields = section_config.get('fields')
+                if fields is None:
+                    print(f"      ⚠️ {section_name}: NO 'fields' key! Keys: {list(section_config.keys())}")
+                elif isinstance(fields, list):
+                    print(f"      ✅ {section_name}: fields is LIST with {len(fields)} items")
+                elif isinstance(fields, dict):
+                    print(f"      ⚠️ {section_name}: fields is DICT with keys: {list(fields.keys())[:5]}...")
+                else:
+                    print(f"      ❓ {section_name}: fields is {type(fields).__name__}")
+            else:
+                print(f"      ❓ {section_name}: section_config is {type(section_config).__name__}")
+
         # Generate sample/dummy data based on schema
         sample_data = generate_sample_form_data(
-            form_schema=request.form_schema,
-            pdf_template=request.pdf_template
+            form_schema=request.form_schema
         )
         print(f"✅ Generated sample data for {len(sample_data)} sections")
 
@@ -551,21 +559,12 @@ async def preview_pdf(request: PreviewPDFRequest):
             "mrn": "PREVIEW-001"
         }
 
-        # Create preview appointment info
-        from datetime import datetime
-        preview_appointment_info = {
-            "date": datetime.now().strftime("%Y-%m-%d"),
-            "time": datetime.now().strftime("%H:%M"),
-            "form_name": request.form_name,
-            "specialty": "preview"
-        }
-
-        # Generate PDF using shared headless React function (same as consultation)
-        pdf_buffer = await generate_consultation_pdf(
+        # Generate PDF using headless React renderer
+        pdf_buffer = await generate_custom_form_pdf_headless(
             form_schema=request.form_schema,
             form_data=sample_data,
+            form_name=request.form_name,
             patient_info=preview_patient_info,
-            appointment_info=preview_appointment_info,
             clinic_branding=clinic_branding
         )
 
@@ -638,19 +637,17 @@ async def preview_saved_form_pdf(
         if not has_permission:
             raise HTTPException(status_code=403, detail="You don't have permission to preview this form")
 
-        # Extract schema and pdf_template
+        # Extract schema
         form_name = form['form_name']
         form_schema = form['form_schema']
-        pdf_template = form['pdf_template']
 
-        if not pdf_template:
-            raise HTTPException(status_code=400, detail="This form does not have a PDF template")
+        if not form_schema:
+            raise HTTPException(status_code=400, detail="This form does not have a schema")
 
         # Use the existing preview_pdf logic
         preview_request = PreviewPDFRequest(
             form_name=form_name,
-            form_schema=form_schema,
-            pdf_template=pdf_template
+            form_schema=form_schema
         )
 
         # Call the preview_pdf function
@@ -799,9 +796,7 @@ async def get_custom_form(
             field_count=form['field_count'] or 0,
             section_count=form['section_count'] or 0,
             created_at=form['created_at'],
-            updated_at=form['updated_at'],
-            form_schema=form.get('form_schema'),
-            pdf_template=form.get('pdf_template')
+            updated_at=form['updated_at']
         )
 
     except HTTPException:
@@ -911,7 +906,6 @@ async def update_custom_form(
             "form_name": request.form_name,
             "specialty": request.specialty,
             "form_schema": request.form_schema,
-            "pdf_template": request.pdf_template,
             "description": request.description,
             "patient_criteria": request.patient_criteria,
             "field_count": field_count,
@@ -1469,7 +1463,7 @@ async def get_default_forms_for_specialty(specialty: str):
 @router.get("/filled-forms/{filled_form_id}/pdf")
 async def download_filled_form_pdf(filled_form_id: str):
     """
-    Generate and download PDF for a filled custom form using stored pdf_template.
+    Generate and download PDF for a filled custom form using headless React renderer.
 
     Args:
         filled_form_id: ID of the filled form record
@@ -1480,8 +1474,8 @@ async def download_filled_form_pdf(filled_form_id: str):
     try:
         user_id = get_current_user_id()
 
-        # Import PDF generator
-        from pdf_generator import generate_custom_form_pdf
+        # Import headless PDF generator
+        from pdf_generator_headless import generate_custom_form_pdf_headless
 
         # Connect to Supabase
         supabase = get_supabase_client()
@@ -1502,19 +1496,18 @@ async def download_filled_form_pdf(filled_form_id: str):
         if filled_form['filled_by'] != user_id and not custom_form['is_public']:
             raise HTTPException(status_code=403, detail="Access denied to this form")
 
-        # Get pdf_template
-        pdf_template = custom_form.get('pdf_template')
-        if not pdf_template:
+        # Get form schema and data
+        form_schema = custom_form.get('form_schema')
+        if not form_schema:
             raise HTTPException(
                 status_code=400,
-                detail="This form does not have a PDF template. Please contact support."
+                detail="This form does not have a schema. Please contact support."
             )
 
-        # Get form data
         form_data = filled_form['form_data']
 
         # Fetch patient info if available
-        patient = None
+        patient_info = None
         patient_id = filled_form.get('patient_id')
         if patient_id:
             patient_response = supabase.table("patients")\
@@ -1524,31 +1517,43 @@ async def download_filled_form_pdf(filled_form_id: str):
 
             if patient_response.data:
                 patient = patient_response.data[0]
+                patient_info = {
+                    "name": patient.get('name', 'Unknown'),
+                    "age": str(patient.get('age_years', '')),
+                    "gender": patient.get('sex', ''),
+                    "mrn": str(patient.get('id', ''))[:8]
+                }
 
-        # Fetch doctor info for logo/clinic name and color scheme
-        doctor_info = None
+        # Fetch doctor info for branding
+        clinic_branding = None
         doctor_response = supabase.table("doctors")\
-            .select("clinic_name, clinic_logo_url, primary_color, accent_color, text_color, light_gray_color")\
+            .select("clinic_name, clinic_logo_url, primary_color, accent_color")\
             .eq("user_id", user_id)\
             .execute()
 
         if doctor_response.data:
             doctor_info = doctor_response.data[0]
+            clinic_branding = {
+                "clinic_name": doctor_info.get('clinic_name', 'Healthcare Medical Center'),
+                "logo_url": doctor_info.get('clinic_logo_url'),
+                "primary_color": doctor_info.get('primary_color', '#0c3555'),
+                "accent_color": doctor_info.get('accent_color', '#1d9e99'),
+                "background_color": "#f6f5ee"
+            }
 
-        # Generate PDF
+        # Generate PDF using headless renderer
         print(f"📄 Generating PDF for filled form: {filled_form_id}")
-        pdf_buffer = generate_custom_form_pdf(
+        pdf_buffer = await generate_custom_form_pdf_headless(
+            form_schema=form_schema,
             form_data=form_data,
-            pdf_template=pdf_template,
             form_name=custom_form['form_name'],
-            specialty=custom_form['specialty'],
-            patient=patient,
-            doctor_info=doctor_info
+            patient_info=patient_info,
+            clinic_branding=clinic_branding
         )
 
         # Create filename
         form_name_safe = custom_form['form_name'].replace(' ', '_').replace('/', '_')
-        patient_name = patient['name'].replace(' ', '_').replace('/', '_') if patient else 'patient'
+        patient_name = patient_info['name'].replace(' ', '_').replace('/', '_') if patient_info else 'patient'
         filename = f"{form_name_safe}_{patient_name}_{filled_form_id[:8]}.pdf"
 
         print(f"✅ PDF generated successfully: {filename}")

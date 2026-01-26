@@ -15,7 +15,19 @@ interface PregnancyRecord {
   anomalies: string;
 }
 
-export function DoctorReportCard() {
+interface ClinicInfo {
+  name?: string;
+  address?: string;
+  tagline?: string;
+  logoUrl?: string;
+  doctorName?: string;
+}
+
+interface DoctorReportCardProps {
+  clinicInfo?: ClinicInfo;
+}
+
+export function DoctorReportCard({ clinicInfo }: DoctorReportCardProps = {}) {
   const [patientData, setPatientData] = useState({
     // Text fields
     patientName: 'John Doe',
@@ -88,23 +100,39 @@ export function DoctorReportCard() {
         <div className="bg-[var(--medical-navy)] text-white p-8">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
-              {/* Logo placeholder */}
-              <div className="w-20 h-20 bg-[var(--medical-teal)] rounded-full flex items-center justify-center">
-                <Activity className="w-10 h-10 text-white" />
-              </div>
+              {/* Logo */}
+              {clinicInfo?.logoUrl ? (
+                <img
+                  src={clinicInfo.logoUrl}
+                  alt={clinicInfo.name || 'Clinic logo'}
+                  className="w-20 h-20 object-contain"
+                />
+              ) : (
+                <div className="w-20 h-20 bg-[var(--medical-teal)] rounded-full flex items-center justify-center">
+                  <Activity className="w-10 h-10 text-white" />
+                </div>
+              )}
               <div>
-                <h1 className="text-3xl text-white">HealthCare Medical Center</h1>
-                <p className="text-[var(--medical-cream)] mt-1">
-                  Excellence in Patient Care | Est. 1995
-                </p>
+                <h1 className="text-3xl text-white">{clinicInfo?.name || 'Medical Center'}</h1>
+                {clinicInfo?.tagline && (
+                  <p className="text-[var(--medical-cream)] mt-1">
+                    {clinicInfo.tagline}
+                  </p>
+                )}
+                {clinicInfo?.doctorName && (
+                  <p className="text-[var(--medical-cream)] mt-1 font-medium">
+                    {clinicInfo.doctorName}
+                  </p>
+                )}
               </div>
             </div>
-            <div className="text-right text-sm text-[var(--medical-cream)]">
-              <p>456 Hospital Avenue</p>
-              <p>Medical District, MD 12345</p>
-              <p>Phone: (555) 123-4567</p>
-              <p>Fax: (555) 123-4568</p>
-            </div>
+            {clinicInfo?.address && (
+              <div className="text-right text-sm text-[var(--medical-cream)]">
+                {clinicInfo.address.split('\n').map((line, index) => (
+                  <p key={index}>{line}</p>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -469,7 +497,7 @@ export function DoctorReportCard() {
             This is a confidential medical document. Unauthorized disclosure is prohibited.
           </p>
           <p className="text-[var(--medical-cream)] mt-1">
-            © 2026 HealthCare Medical Center. All rights reserved.
+            © {new Date().getFullYear()} {clinicInfo?.name || 'Medical Center'}. All rights reserved.
           </p>
         </div>
       </div>
