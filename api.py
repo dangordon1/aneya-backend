@@ -5606,6 +5606,8 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
         from mcp_servers.field_validator import validate_multiple_fields, filter_by_confidence, exclude_existing_fields
         import time
 
+        supabase = get_supabase_client()
+
         start_time = time.time()
 
         print(f"📋 Extracting fields for {request.form_type} form (chunk #{request.chunk_index})")
@@ -6064,12 +6066,16 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             print(f"🔄 Updating form with {len(field_updates)} fields...")
             print(f"   Fields to update: {list(field_updates.keys())}")
 
-            # ✨ NEW: Deep merge extracted fields into form_data JSONB
+            # ✨ Convert dot-notation keys to nested structure for SurveyJS compatibility
+            # e.g. "history_and_presentation.angina" -> {"history_and_presentation": {"angina": ...}}
+            nested_field_updates = expand_dot_notation(field_updates)
+            print(f"🔄 Expanded {len(field_updates)} dot-notation keys to {len(nested_field_updates)} top-level keys")
+
             # Deep merge preserves nested structures and arrays (critical for aggregation)
-            merged_form_data = deep_merge(current_form_state, field_updates)
+            merged_form_data = deep_merge(current_form_state, nested_field_updates)
             print(f"🔄 Deep merged form data:")
             print(f"   Current state had {len(current_form_state)} top-level keys")
-            print(f"   Field updates have {len(field_updates)} nested paths")
+            print(f"   Nested updates have {len(nested_field_updates)} top-level keys")
             print(f"   Merged result has {len(merged_form_data)} top-level keys")
 
             # Update the form
@@ -6305,6 +6311,43 @@ def fetch_patient_context(patient_id: str, form_type: str = None) -> dict:
             'allergies': [],
             'previous_forms': []
         }
+
+
+def expand_dot_notation(flat_dict: dict) -> dict:
+    """
+    Expand dot-notation keys into nested dictionary structure.
+
+    Example:
+        {"history_and_presentation.angina": True, "examination.pulse_per_min": 78}
+        becomes:
+        {"history_and_presentation": {"angina": True}, "examination": {"pulse_per_min": 78}}
+
+    Args:
+        flat_dict: Dictionary with dot-notation keys
+
+    Returns:
+        Nested dictionary structure
+    """
+    result = {}
+
+    for key, value in flat_dict.items():
+        if '.' in key:
+            # Split the key by dots and build nested structure
+            parts = key.split('.')
+            current = result
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {}
+                elif not isinstance(current[part], dict):
+                    # If existing value is not a dict, convert to dict
+                    current[part] = {}
+                current = current[part]
+            current[parts[-1]] = value
+        else:
+            # No dot notation, keep as-is
+            result[key] = value
+
+    return result
 
 
 def deep_merge(dict1: dict, dict2: dict) -> dict:
@@ -6717,6 +6760,7 @@ def _get_form_schema_from_db_cached(form_type: str, full_metadata: bool = False)
             return {
                 'schema': form_data['form_schema'],
                 'table_metadata': form_data.get('table_metadata', {}),  # Table classification data
+                'name': form_data.get('form_name', ''),  # Form name for display
                 'title': form_data.get('description', ''),
                 'description': form_data.get('description', ''),
                 'version': form_data.get('version', 1),
@@ -7444,6 +7488,11 @@ async def get_consultation_form(appointment_id: str, form_type: str):
             .execute()
 
         if result.data:
+            # Convert any flat dot-notation keys to nested structure for frontend compatibility
+            # e.g. "history_and_presentation.angina" -> {"history_and_presentation": {"angina": ...}}
+            form_data = result.data.get('form_data', {})
+            if form_data:
+                result.data['form_data'] = expand_dot_notation(form_data)
             return {"form": result.data}
         else:
             return {"form": None}
