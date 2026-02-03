@@ -165,7 +165,7 @@ async def upload_custom_form(
         specialty: Medical specialty (e.g., 'cardiology', 'neurology')
         description: Optional description of the form
         is_public: Whether to make form available to all doctors
-        files: List of HEIC/JPEG/PNG image files
+        files: List of HEIC/JPEG/PNG image files or PDF documents
 
     Returns:
         Extraction results with schema for review

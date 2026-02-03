@@ -176,6 +176,41 @@ class ImageAnalyzer:
         with open(image_path, 'rb') as f:
             return base64.b64encode(f.read()).decode('utf-8')
 
+    def encode_file_for_claude(self, file_path: str) -> dict:
+        """
+        Encode a file (image or PDF) into the appropriate Claude API content block.
+
+        For PDFs, returns a 'document' type block.
+        For images, returns an 'image' type block.
+
+        Args:
+            file_path: Path to file (image or PDF)
+
+        Returns:
+            Dict content block for Claude API
+        """
+        file_ext = Path(file_path).suffix.lower()
+        file_base64 = self.encode_image_base64(file_path)
+
+        if file_ext == '.pdf':
+            return {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": file_base64
+                }
+            }
+        else:
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": file_base64
+                }
+            }
+
     def extract_and_upload_logo(
         self,
         image_path: str,
@@ -509,18 +544,10 @@ Return ONLY the JSON object, no additional text. If you don't find specific rela
         print("🔍 SCHEMA EXTRACTION (Call 1/2)")
         print("="*80)
 
-        # Build image content for ALL images
+        # Build content for ALL files (images and PDFs)
         image_content = []
-        for img_path in image_paths:
-            img_base64 = self.encode_image_base64(img_path)
-            image_content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": img_base64
-                }
-            })
+        for file_path in image_paths:
+            image_content.append(self.encode_file_for_claude(file_path))
 
         # Schema-only prompt
         prompt = """Analyze these medical form images to extract the complete form data schema.
@@ -797,44 +824,48 @@ Pla    | G    |H |I           "row_names": ["Date", "Single/Multiple", "GA", "Li
 
     def analyze_images(self, heic_paths: List[str]) -> FormAnalysis:
         """
-        Complete comprehensive analysis of form images using Opus 4.5.
+        Complete comprehensive analysis of form images/PDFs using Opus 4.5.
         Extracts form schema.
 
         Args:
-            heic_paths: List of paths to images (HEIC, JPEG, PNG)
+            heic_paths: List of paths to files (HEIC, JPEG, PNG, or PDF)
 
         Returns:
             FormAnalysis object with complete analysis results
         """
-        # Step 1: Convert HEIC to JPEG and compress all images
-        print("Processing images...")
-        jpeg_paths = []
-        for image_path in heic_paths:
+        # Step 1: Process files - convert HEIC to JPEG, compress images, pass PDFs through
+        print("Processing files...")
+        processed_paths = []
+        for file_path in heic_paths:
             try:
-                file_ext = Path(image_path).suffix.lower()
+                file_ext = Path(file_path).suffix.lower()
 
+                # PDFs: pass through directly (no conversion or compression needed)
+                if file_ext == '.pdf':
+                    processed_paths.append(file_path)
+                    print(f"  ✓ PDF file: {Path(file_path).name} (passed through directly)")
                 # If HEIC, convert to JPEG (includes compression)
-                if file_ext in ['.heic', '.heif']:
-                    jpeg_path = self.convert_heic_to_jpeg(image_path)
-                    jpeg_paths.append(jpeg_path)
-                    print(f"  ✓ Converted {Path(image_path).name} from HEIC to JPEG")
+                elif file_ext in ['.heic', '.heif']:
+                    jpeg_path = self.convert_heic_to_jpeg(file_path)
+                    processed_paths.append(jpeg_path)
+                    print(f"  ✓ Converted {Path(file_path).name} from HEIC to JPEG")
                 # If already JPEG or PNG, compress if needed
                 elif file_ext in ['.jpg', '.jpeg', '.png']:
                     # Compress to ensure under 5MB Claude API limit
-                    compressed_path = self.compress_image(image_path)
-                    jpeg_paths.append(compressed_path)
-                    print(f"  ✓ Processed {Path(image_path).name}")
+                    compressed_path = self.compress_image(file_path)
+                    processed_paths.append(compressed_path)
+                    print(f"  ✓ Processed {Path(file_path).name}")
                 else:
-                    print(f"  ⚠️  Skipping {Path(image_path).name} (unsupported format: {file_ext})")
+                    print(f"  ⚠️  Skipping {Path(file_path).name} (unsupported format: {file_ext})")
             except Exception as e:
-                print(f"  ✗ Failed to process {image_path}: {e}")
+                print(f"  ✗ Failed to process {file_path}: {e}")
 
-        if not jpeg_paths:
-            raise ValueError("No images were successfully processed. Please upload JPEG, PNG, or HEIC images.")
+        if not processed_paths:
+            raise ValueError("No files were successfully processed. Please upload JPEG, PNG, HEIC images or PDF files.")
 
         # Step 2: Comprehensive analysis with Opus 4.5
-        print(f"\n🔍 Analyzing {len(jpeg_paths)} images with Claude Opus 4.5...")
-        comprehensive_result = self.analyze_form_comprehensive(jpeg_paths)
+        print(f"\n🔍 Analyzing {len(processed_paths)} file(s) with Claude Opus 4.5...")
+        comprehensive_result = self.analyze_form_comprehensive(processed_paths)
 
         form_structure = comprehensive_result['form_structure']
 
@@ -859,7 +890,7 @@ Pla    | G    |H |I           "row_names": ["Date", "Single/Multiple", "GA", "Li
                 }),
                 "total_fields": total_fields,
                 "section_count": len(sections),
-                "image_count": len(jpeg_paths),
+                "image_count": len(processed_paths),
                 "model_used": "claude-opus-4-5-20251101"
             }
         )
