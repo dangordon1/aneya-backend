@@ -119,8 +119,10 @@ def _validate_string(value: Any, metadata: Dict[str, Any]) -> Tuple[bool, Any, O
     # Validate format if specified
     format_type = metadata.get('format')
     if format_type == 'YYYY-MM-DD':
-        if not _is_valid_date(str_value):
-            return False, None, f"Invalid date format: '{str_value}'. Expected YYYY-MM-DD"
+        normalized = _normalize_date(str_value)
+        if normalized is None:
+            return False, None, f"Invalid date format: '{str_value}'. Expected a recognizable date"
+        return True, normalized, None
 
     return True, str_value, None
 
@@ -257,13 +259,19 @@ def sanitize_string(text: str) -> str:
     return text.strip()
 
 
+def _normalize_date(date_str: str) -> Optional[str]:
+    """Parse common date formats and normalize to YYYY-MM-DD."""
+    for fmt in ('%Y-%m-%d', '%b %d, %Y', '%B %d, %Y', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y'):
+        try:
+            return datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+        except ValueError:
+            continue
+    return None
+
+
 def _is_valid_date(date_str: str) -> bool:
-    """Check if string is a valid YYYY-MM-DD date."""
-    try:
-        datetime.strptime(date_str, '%Y-%m-%d')
-        return True
-    except ValueError:
-        return False
+    """Check if string is a valid date in any recognized format."""
+    return _normalize_date(date_str) is not None
 
 
 # ============================================

@@ -23,7 +23,6 @@ class FormConversionResult:
     form_name: str
     specialty: str
     schema: Dict[str, Any]
-    pdf_template: Dict[str, Any]  # PDF layout configuration
     schema_code: str
     migration_sql: Optional[str] = None
     typescript_types: Optional[str] = None
@@ -99,7 +98,6 @@ class FormConverterAPI:
                 form_name=form_name,
                 specialty=specialty,
                 schema=schema_dict,
-                pdf_template=analysis.pdf_template,  # Include PDF template
                 schema_code=schema_code,
                 migration_sql=migration_sql,
                 typescript_types=typescript_types,
@@ -112,7 +110,6 @@ class FormConverterAPI:
                 form_name=form_name,
                 specialty=specialty,
                 schema={},
-                pdf_template={},  # Empty template on error
                 schema_code="",
                 error=str(e)
             )
