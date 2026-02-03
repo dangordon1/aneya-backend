@@ -5346,6 +5346,7 @@ class DetermineConsultationTypeRequest(BaseModel):
     diarized_segments: list
     doctor_specialty: str  # 'obgyn', 'general', etc.
     patient_context: dict
+    user_id: Optional[str] = None  # Filter forms to this user's owned + adopted forms
 
 
 class DetermineConsultationTypeResponse(BaseModel):
@@ -5363,6 +5364,7 @@ class ExtractFormFieldsRequest(BaseModel):
     current_form_state: dict
     chunk_index: int
     appointment_id: Optional[str] = None  # For excluding current appointment from historical aggregation
+    user_id: Optional[str] = None  # Validate form belongs to this user's owned + adopted forms
 
 
 class ExtractFormFieldsResponse(BaseModel):
@@ -5426,18 +5428,51 @@ async def determine_consultation_type(request: DetermineConsultationTypeRequest)
             }
             db_specialty = specialty_mapping.get(request.doctor_specialty, request.doctor_specialty)
 
-            # Query forms from database
-            if db_specialty:
-                forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').eq('specialty', db_specialty).execute()
+            # Query forms scoped to the user (owned + adopted) if user_id is provided
+            if request.user_id:
+                # Get doctor's UUID from user_id (Firebase UID)
+                doctor_id = None
+                try:
+                    doctor_result = supabase.table("doctors").select("id").eq("user_id", request.user_id).single().execute()
+                    doctor_id = doctor_result.data.get('id') if doctor_result.data else None
+                except Exception:
+                    pass
+
+                # Get owned forms
+                owned_query = supabase.table('custom_forms').select('form_name, description')\
+                    .eq('status', 'active').eq('created_by', request.user_id)
+                if db_specialty:
+                    owned_query = owned_query.eq('specialty', db_specialty)
+                owned_forms = owned_query.execute().data or []
+
+                # Get adopted forms
+                adopted_forms = []
+                if doctor_id:
+                    adopted_result = supabase.table("doctor_adopted_forms")\
+                        .select("form_id, custom_forms(form_name, description, specialty)")\
+                        .eq("doctor_id", doctor_id).execute()
+                    for record in (adopted_result.data or []):
+                        form = record.get('custom_forms', {})
+                        if form and form.get('form_name') and (not db_specialty or form.get('specialty') == db_specialty):
+                            adopted_forms.append({'form_name': form['form_name'], 'description': form.get('description', '')})
+
+                available_forms = owned_forms + adopted_forms
+                print(f"📋 User-scoped forms: {len(owned_forms)} owned + {len(adopted_forms)} adopted")
             else:
-                forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
+                # Fallback: all active forms for specialty (original behavior)
+                if db_specialty:
+                    forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').eq('specialty', db_specialty).execute()
+                else:
+                    forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
+                available_forms = forms_response.data if forms_response.data else []
 
-            available_forms = forms_response.data if forms_response.data else []
-
-            if not available_forms:
-                print(f"⚠️  No forms found for specialty {db_specialty}, fetching all active forms")
+            if not available_forms and not request.user_id:
+                # Only fall back to global when no user context is available
+                print(f"⚠️  No forms found for specialty {db_specialty}, fetching all active forms (no user_id)")
                 forms_response = supabase.table('custom_forms').select('form_name, description').eq('status', 'active').execute()
                 available_forms = forms_response.data if forms_response.data else []
+            elif not available_forms:
+                print(f"⚠️  No forms found for user {request.user_id[:8]}... in specialty {db_specialty}")
         except Exception as db_error:
             print(f"❌ Could not fetch forms from database: {db_error}")
             raise HTTPException(
@@ -5613,15 +5648,42 @@ async def extract_form_fields(request: ExtractFormFieldsRequest):
         print(f"📋 Extracting fields for {request.form_type} form (chunk #{request.chunk_index})")
 
         # Validate form type against database - check if form exists
-        form_check = supabase.table('custom_forms').select('form_name').eq('form_name', request.form_type).eq('status', 'active').execute()
-        if not form_check.data:
-            # Get list of valid forms for error message
-            valid_forms = supabase.table('custom_forms').select('form_name').eq('status', 'active').execute()
-            valid_names = [f['form_name'] for f in (valid_forms.data or [])]
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid form type: {request.form_type}. Expected one of: {', '.join(valid_names)}"
-            )
+        if request.user_id:
+            # Validate form belongs to user (owned or adopted)
+            doctor_id = None
+            try:
+                doctor_result = supabase.table("doctors").select("id").eq("user_id", request.user_id).single().execute()
+                doctor_id = doctor_result.data.get('id') if doctor_result.data else None
+            except Exception:
+                pass
+
+            owned = supabase.table('custom_forms').select('form_name')\
+                .eq('form_name', request.form_type).eq('status', 'active')\
+                .eq('created_by', request.user_id).execute()
+
+            adopted = []
+            if doctor_id:
+                adopted_result = supabase.table("doctor_adopted_forms")\
+                    .select("custom_forms(form_name)")\
+                    .eq("doctor_id", doctor_id).execute()
+                adopted = [r['custom_forms']['form_name'] for r in (adopted_result.data or [])
+                           if r.get('custom_forms', {}).get('form_name') == request.form_type]
+
+            if not (owned.data or adopted):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Form '{request.form_type}' not in your library"
+                )
+        else:
+            # Fallback: global validation (existing behavior)
+            form_check = supabase.table('custom_forms').select('form_name').eq('form_name', request.form_type).eq('status', 'active').execute()
+            if not form_check.data:
+                valid_forms = supabase.table('custom_forms').select('form_name').eq('status', 'active').execute()
+                valid_names = [f['form_name'] for f in (valid_forms.data or [])]
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid form type: {request.form_type}. Expected one of: {', '.join(valid_names)}"
+                )
 
         # Process ALL segments (both doctor and patient)
         # Patient responses often contain the critical medical information
@@ -5731,6 +5793,11 @@ Rules:
 7. For blood pressure, use "bp" field with format "120/80"
 8. Return JSON with field_updates and confidence_scores
 9. Use patient context (demographics, medications, conditions, allergies) to validate and contextualize extracted information
+10. For TABLE fields (marked [TABLE]): return an ARRAY of row objects with ALL columns filled per row.
+    - Each row must have values for every column in the table.
+    - Create separate rows when data applies to different categories (e.g., Left/Right sides, different dates, different medications).
+    - Use short, specific values per cell — NOT long descriptions that repeat across columns.
+    - If a value applies equally to all rows (e.g., "equal bilaterally"), still create separate rows with the individual value.
 
 Examples:
 - Doctor: "Any previous pregnancies?" → Patient: "Yes, two" → Extract: "gravida": 2
@@ -5738,6 +5805,8 @@ Examples:
 - Doctor: "Weight is 61 kilos" → Extract: "weight": 61
 - Doctor: "Fetal heart rate is 170" → Extract: "fhr": 170
 - Patient: "I've been bleeding heavily for 3 days" → Extract relevant symptoms
+- Doctor: "Peripheral pulses 2+ equal bilaterally" → Extract TABLE: "peripheral_pulses": [{{"side": "Left", "carotid": "2+", "radial": "2+", ...}}, {{"side": "Right", "carotid": "2+", "radial": "2+", ...}}]
+- Doctor: "BP supine 155/95, sitting 150/92" → Extract TABLE: "blood_pressure": [{{"supine": "155/95", "sitting": "150/92"}}]
 
 Current Form State (DO NOT extract these fields):
 {json.dumps(request.current_form_state, indent=2)}"""
@@ -5913,6 +5982,24 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
         except Exception as e:
             print(f"⚠️ Failed to fetch appointment specialty: {e}, using default: {doctor_specialty}")
 
+        # Step 1c: Resolve user_id for user-scoped form filtering
+        user_id = None
+        try:
+            consultation = supabase.table('consultations')\
+                .select('performed_by')\
+                .eq('id', request.consultation_id)\
+                .single()\
+                .execute()
+            if consultation.data and consultation.data.get('performed_by'):
+                user_id = consultation.data['performed_by']
+                print(f"✅ Resolved user_id from consultation.performed_by: {user_id[:8]}...")
+        except Exception:
+            pass
+        if not user_id:
+            user_id = request.patient_snapshot.get('user_id')
+            if user_id:
+                print(f"✅ Resolved user_id from patient_snapshot: {user_id[:8]}...")
+
         # Step 2: Determine consultation type using existing endpoint function
         type_request = DetermineConsultationTypeRequest(
             diarized_segments=diarized_segments,
@@ -5920,7 +6007,8 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             patient_context={
                 'patient_id': request.patient_id,
                 'consultation_id': request.consultation_id
-            }
+            },
+            user_id=user_id
         )
         type_result = await determine_consultation_type(type_request)
 
@@ -5962,30 +6050,7 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             # Step 4: Create new form
             print(f"➕ Creating new {consultation_type} form...")
 
-            # Get Firebase UID from consultation.performed_by (doctor who performed the consultation)
-            # After migration, created_by is TEXT type and accepts Firebase UIDs directly
-            user_id = None
-            try:
-                consultation = supabase.table('consultations')\
-                    .select('performed_by')\
-                    .eq('id', request.consultation_id)\
-                    .single()\
-                    .execute()
-
-                if consultation.data and consultation.data.get('performed_by'):
-                    user_id = consultation.data['performed_by']
-                    print(f"✅ Using consultation.performed_by as created_by: {user_id[:8]}...")
-                else:
-                    print(f"⚠️  Consultation has no performed_by field")
-            except Exception as e:
-                print(f"⚠️  Failed to fetch consultation: {e}")
-
-            # Fallback: Try patient_snapshot.user_id
-            if not user_id:
-                user_id = request.patient_snapshot.get('user_id')
-                if user_id:
-                    print(f"✅ Using patient_snapshot.user_id as created_by: {user_id[:8]}...")
-
+            # user_id already resolved in Step 1c above
             # Final fallback: Use system default if still no user_id
             if not user_id:
                 user_id = '8c55534b-3c7a-436a-bb00-70dc6722439f'
@@ -6055,7 +6120,8 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             patient_context=patient_context,
             current_form_state=current_form_state,
             chunk_index=0,
-            appointment_id=request.appointment_id  # Pass appointment_id to exclude from historical aggregation
+            appointment_id=request.appointment_id,  # Pass appointment_id to exclude from historical aggregation
+            user_id=user_id  # Pass user_id for user-scoped form validation
         )
         extraction_result = await extract_form_fields(extraction_request)
 
@@ -6715,14 +6781,12 @@ def _get_form_schema_from_db_cached(form_type: str, full_metadata: bool = False)
             for i, form in enumerate(result.data):
                 print(f"   Form {i+1}: form_name='{form.get('form_name')}', specialty='{form.get('specialty')}', status='{form.get('status')}'")
 
-        # Filter for matching form_type (by specialty, form_name, or form_name starts with form_type)
-        matching_forms = [
-            form for form in (result.data or [])
-            if (form.get('specialty') == form_type or
-                form.get('form_name') == form_type or
-                form.get('form_name', '').startswith(form_type + '_') or
-                form.get('form_name', '').startswith(form_type))
-        ]
+        # Try exact form_name match first
+        matching_forms = [f for f in (result.data or []) if f.get('form_name') == form_type]
+
+        # Only fall back to specialty match if no exact name match found
+        if not matching_forms:
+            matching_forms = [f for f in (result.data or []) if f.get('specialty') == form_type]
 
         print(f"📊 Found {len(matching_forms)} forms matching form_type '{form_type}'")
 
@@ -6808,6 +6872,8 @@ def get_form_schema_from_db(form_type: str, full_metadata: bool = False) -> dict
 def flatten_schema_for_extraction(schema: dict) -> tuple[dict, dict]:
     """
     Flatten nested schema into simple fields for LLM extraction.
+    Table/array fields are kept as whole table definitions so the LLM
+    can return properly structured multi-row arrays.
 
     Returns:
         - flattened_schema: Dict of {simple_field_name: field_definition}
@@ -6820,7 +6886,6 @@ def flatten_schema_for_extraction(schema: dict) -> tuple[dict, dict]:
         if not isinstance(section_def, dict):
             continue
 
-        # NEW: Database schema has fields as ARRAY
         if 'fields' in section_def and isinstance(section_def['fields'], list):
             for field in section_def['fields']:
                 if not isinstance(field, dict):
@@ -6830,23 +6895,18 @@ def flatten_schema_for_extraction(schema: dict) -> tuple[dict, dict]:
                 if not field_name:
                     continue
 
-                # For array/table fields, flatten the row_fields
+                # For array/table fields, keep as a whole table definition
                 if field.get('type') == 'array' and field.get('row_fields'):
-                    for row_field in field.get('row_fields', []):
-                        if isinstance(row_field, dict):
-                            row_field_name = row_field.get('name', '')
-                            if row_field_name:
-                                # Create simple field name (e.g., "weight" instead of "antenatal_visits.visit_records.weight")
-                                simple_name = row_field_name
-                                nested_path = f"{section_name}.{field_name}.{row_field_name}"
+                    simple_name = field_name
+                    nested_path = f"{section_name}.{field_name}"
 
-                                flattened_schema[simple_name] = row_field
-                                field_mapping[simple_name] = nested_path
-
-                                # Also add with prefix for disambiguation (e.g., "visit_weight")
-                                prefixed_name = f"{field_name.replace('_records', '')}_{row_field_name}"
-                                flattened_schema[prefixed_name] = row_field
-                                field_mapping[prefixed_name] = nested_path
+                    # Mark it as a table field with its full definition
+                    table_field = {
+                        **field,
+                        '_is_table': True,
+                    }
+                    flattened_schema[simple_name] = table_field
+                    field_mapping[simple_name] = nested_path
                 else:
                     # Simple field - use field name directly
                     simple_name = field_name
@@ -6861,6 +6921,8 @@ def flatten_schema_for_extraction(schema: dict) -> tuple[dict, dict]:
 def build_extraction_prompt_hints_from_flattened_schema(flattened_schema: dict) -> str:
     """
     Build extraction hints from flattened schema.
+    Table/array fields are described with their column structure so the LLM
+    returns properly structured arrays of row objects.
     """
     hints = []
 
@@ -6869,21 +6931,47 @@ def build_extraction_prompt_hints_from_flattened_schema(flattened_schema: dict) 
         field_type = field_def.get('type', 'string')
         field_hints = field_def.get('extraction_hints', [])
 
-        hint_parts = [f"- {field_name}"]
+        # Table/array fields: describe column structure
+        if field_def.get('_is_table') and field_def.get('row_fields'):
+            row_fields = field_def['row_fields']
+            col_descriptions = []
+            for rf in row_fields:
+                rf_name = rf.get('name', '')
+                rf_label = rf.get('label', rf_name)
+                rf_type = rf.get('type', 'string')
+                col_descriptions.append(f'"{rf_name}" ({rf_label}, {rf_type})')
 
-        # Add label if different
-        if field_label and field_label != field_name:
-            hint_parts.append(f"({field_label})")
+            columns_str = ', '.join(col_descriptions)
+            description = field_def.get('description', '')
+            desc_str = f' — {description}' if description else ''
 
-        # Add type
-        hint_parts.append(f"[{field_type}]")
+            hint = (
+                f"- {field_name} ({field_label}) [TABLE]{desc_str}\n"
+                f"  Return as array of row objects. Columns: {columns_str}\n"
+                f"  Example: \"{field_name}\": [{{" +
+                ', '.join([f'"{rf.get("name", "")}": "value"' for rf in row_fields[:3]]) +
+                ", ...}]"
+            )
 
-        # Add extraction hints
-        if field_hints:
-            hints_str = ', '.join(field_hints)
-            hint_parts.append(f": {hints_str}")
+            # Add extraction hints if any
+            if field_hints:
+                hint += f"\n  Extraction hints: {', '.join(field_hints)}"
 
-        hints.append(' '.join(hint_parts))
+            hints.append(hint)
+        else:
+            # Simple field
+            hint_parts = [f"- {field_name}"]
+
+            if field_label and field_label != field_name:
+                hint_parts.append(f"({field_label})")
+
+            hint_parts.append(f"[{field_type}]")
+
+            if field_hints:
+                hints_str = ', '.join(field_hints)
+                hint_parts.append(f": {hints_str}")
+
+            hints.append(' '.join(hint_parts))
 
     return '\n'.join(hints) if hints else "No fields available"
 
@@ -6891,6 +6979,9 @@ def build_extraction_prompt_hints_from_flattened_schema(flattened_schema: dict) 
 def map_flat_fields_to_nested(flat_updates: dict, field_mapping: dict) -> dict:
     """
     Convert flat field updates back to nested structure.
+
+    Table/array fields are expected to already be arrays of row objects
+    from the LLM, so they are mapped directly to their nested path.
 
     Args:
         flat_updates: Dict of {simple_field_name: value}
@@ -6906,19 +6997,12 @@ def map_flat_fields_to_nested(flat_updates: dict, field_mapping: dict) -> dict:
         nested_path = field_mapping.get(field_name)
 
         if nested_path:
-            # Handle array fields (e.g., antenatal_visits.visit_records.weight)
-            if '..' in nested_path or nested_path.count('.') > 1:
-                # This is a nested array field - wrap in array structure
-                parts = nested_path.split('.')
-                if len(parts) == 3:
-                    section, array_field, row_field = parts
-                    # Create array with single row containing this field
-                    array_path = f"{section}.{array_field}"
-                    if array_path not in nested_updates:
-                        nested_updates[array_path] = [{}]
-                    nested_updates[array_path][0][row_field] = value
+            # Table/array fields: the LLM should return these as arrays already.
+            # The nested_path for tables is "section.field_name" (2 parts).
+            # Just map the value directly.
+            if isinstance(value, list):
+                nested_updates[nested_path] = value
             else:
-                # Simple nested field
                 nested_updates[nested_path] = value
         else:
             # No mapping found - use as-is (might be a direct field)

@@ -21,7 +21,6 @@ class FormAnalysis:
     """Structured form analysis result"""
     form_name: str
     sections: List[Dict[str, Any]]
-    pdf_template: Dict[str, Any]  # PDF layout configuration
     metadata: Dict[str, Any]
 
 
@@ -791,241 +790,21 @@ Pla    | G    |H |I           "row_names": ["Date", "Single/Multiple", "GA", "Li
 
             raise ValueError(f"Failed to parse JSON response from Claude: {e.msg} at position {e.pos}")
 
-    def analyze_pdf_layout(self, image_paths: List[str], form_structure: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Second call: Extract detailed PDF layout template based on the form schema.
-
-        Args:
-            image_paths: All form images (2-10 JPEG images)
-            form_structure: Previously extracted form structure (for context)
-
-        Returns:
-            Dict with 'pdf_template' key containing detailed layout configuration
-        """
-        import json
-
-        # Build image content for ALL images
-        image_content = []
-        for img_path in image_paths:
-            img_base64 = self.encode_image_base64(img_path)
-            image_content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": img_base64
-                }
-            })
-
-        # Extract section names and field names for reference
-        section_names = [s['name'] for s in form_structure.get('sections', [])]
-        sections_str = ", ".join(section_names)
-
-        # Extract ALL field names (especially tables) from schema
-        all_fields = []
-        table_fields = []
-        for section in form_structure.get('sections', []):
-            for field in section.get('fields', []):
-                field_name = field.get('name')
-                field_type = field.get('type')
-                input_type = field.get('input_type', '')
-
-                all_fields.append(field_name)
-
-                # Track table fields specifically
-                if field_type == 'array' and input_type.startswith('table'):
-                    table_fields.append(f"{field_name} ({input_type})")
-
-        fields_str = ", ".join(all_fields)
-        tables_str = ", ".join(table_fields) if table_fields else "none"
-
-        # PDF layout prompt
-        prompt = f"""Analyze these medical form images to create a DETAILED PDF layout template.
-
-The form has these sections: {sections_str}
-
-**ALL FIELDS TO INCLUDE** (total {len(all_fields)}): {fields_str}
-
-**TABLE FIELDS** (MUST be included): {tables_str}
-
-Return a JSON object with this exact structure:
-
-{{
-  "pdf_template": {{
-    "page_config": {{
-      "size": "A4",
-      "margins": {{"top": 40, "bottom": 40, "left": 50, "right": 50}},
-      "header": {{
-        "show_logo": true,
-        "show_clinic_name": true,
-        "title": "Form Title"
-      }},
-      "footer": {{
-        "show_page_numbers": true,
-        "show_timestamp": true
-      }}
-    }},
-    "sections": [
-      {{
-        "id": "section_name",
-        "title": "Section Title As Shown On Form",
-        "layout": "single_column|two_column|three_column|table",
-        "page_break_before": false,
-        "fields": [
-          {{
-            "field_name": "field_name_from_schema",
-            "label": "Field Label",
-            "position": {{"column": 1, "row": 1, "order": 1}},
-            "style": {{
-              "font_size": 10,
-              "bold": false,
-              "width": 100
-            }}
-          }}
-        ]
-      }}
-    ],
-    "styling": {{
-      "primary_color": "#0c3555",
-      "accent_color": "#1d9e99",
-      "section_header_size": 12,
-      "field_label_size": 9,
-      "field_value_size": 10
-    }}
-  }}
-}}
-
-**CRITICAL REQUIREMENTS**:
-
-1. **Include EVERY field from the form** - both regular fields AND table fields:
-   - Regular fields: text inputs, checkboxes, dates, etc.
-   - Table fields: ALL tables must be included with field_name matching the schema
-   - Do NOT skip or omit table fields - they are critical
-
-2. **Visual layout**:
-   - Match the VISUAL LAYOUT of the original form exactly
-   - Preserve field positioning and column layout from the paper form
-   - Use the same section ordering as the original form
-   - For tables, use layout: "table" and include the field_name
-
-3. **Field naming**:
-   - field_name MUST exactly match the field names from the schema
-   - For tables: use exact table names like "obstetric_history_table", "usg_scans_table", etc.
-
-4. **Return ONLY valid JSON**, no additional text
-
-Use Aneya color scheme: Navy #0c3555, Teal #1d9e99
-
-**EXAMPLE for a table field**:
-{{
-  "id": "obstetric_history",
-  "title": "Obstetric History",
-  "layout": "table",
-  "fields": [
-    {{
-      "field_name": "obstetric_history_table",
-      "label": "Obstetric History Table",
-      "position": {{"column": 1, "row": 1, "order": 1}},
-      "style": {{"font_size": 9}}
-    }}
-  ]
-}}"""
-
-        # Call Opus 4.5
-        print("\n🤖 [CALL 2/2] Extracting PDF layout template with Claude Opus 4.5...")
-        print(f"📊 Model: {self.model}")
-        print(f"📸 Processing {len(image_paths)} images")
-
-        message = self.client.messages.create(
-            model=self.model,  # claude-opus-4-5-20251101
-            max_tokens=16384,  # Maximum allowed for Opus 4.5
-            messages=[{
-                "role": "user",
-                "content": image_content + [{"type": "text", "text": prompt}]
-            }]
-        )
-
-        # Parse response
-        response_text = message.content[0].text
-        print(f"\n✅ Received response from Claude ({len(response_text)} characters)")
-
-        # Extract JSON from response (handle markdown code blocks)
-        original_response = response_text
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
-            print("📝 Extracted JSON from ```json code block")
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0].strip()
-            print("📝 Extracted JSON from ``` code block")
-        else:
-            print("📝 Using response as-is (no code block detected)")
-
-        print(f"📏 JSON text length: {len(response_text)} characters")
-
-        # Try to parse JSON with detailed error reporting
-        try:
-            result = json.loads(response_text)
-            print("✅ Successfully parsed JSON")
-            print(f"📦 Result keys: {list(result.keys())}")
-            return result
-        except json.JSONDecodeError as e:
-            print(f"\n❌ JSON Parse Error at line {e.lineno}, column {e.colno}: {e.msg}")
-            print(f"\n🔍 First 500 chars of JSON text:")
-            print(response_text[:500])
-            print(f"\n🔍 Last 500 chars of JSON text:")
-            print(response_text[-500:])
-            print(f"\n🔍 Error position context (±100 chars):")
-            start = max(0, e.pos - 100)
-            end = min(len(response_text), e.pos + 100)
-            context = response_text[start:end]
-            print(context)
-            print(" " * (min(100, e.pos - start)) + "^ ERROR HERE")
-
-            # Save full response to temp file for debugging
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                f.write("=== ORIGINAL RESPONSE ===\n")
-                f.write(original_response)
-                f.write("\n\n=== EXTRACTED JSON ===\n")
-                f.write(response_text)
-                print(f"\n💾 Full response saved to: {f.name}")
-
-            raise ValueError(f"Failed to parse JSON response from Claude: {e.msg} at position {e.pos}")
-
-    def analyze_form_comprehensive(self, image_paths: List[str]) -> Dict[str, Any]:
-        """
-        Two-call comprehensive analysis using Opus 4.5.
-        Call 1: Extract form schema
-        Call 2: Extract PDF layout template
-
-        Args:
-            image_paths: All form images (2-10 JPEG images)
-
-        Returns:
-            Dict with 'form_structure' and 'pdf_template' keys
-        """
-        # Call 1: Extract schema
+    def analyze_form_comprehensive(self, image_paths):
+        """Analyze form comprehensively - extract schema only."""
         schema_result = self.analyze_form_schema_only(image_paths)
-
-        # Call 2: Extract PDF layout (using schema for context)
-        pdf_result = self.analyze_pdf_layout(image_paths, schema_result['form_structure'])
-
-        # Merge results
-        return {
-            "form_structure": schema_result['form_structure'],
-            "pdf_template": pdf_result['pdf_template']
-        }
+        return {"form_structure": schema_result['form_structure']}
 
     def analyze_images(self, heic_paths: List[str]) -> FormAnalysis:
         """
         Complete comprehensive analysis of form images using Opus 4.5.
-        Extracts both form schema and PDF layout template.
+        Extracts form schema.
 
         Args:
             heic_paths: List of paths to images (HEIC, JPEG, PNG)
 
         Returns:
-            FormAnalysis object with complete analysis results including PDF template
+            FormAnalysis object with complete analysis results
         """
         # Step 1: Convert HEIC to JPEG and compress all images
         print("Processing images...")
@@ -1058,20 +837,17 @@ Use Aneya color scheme: Navy #0c3555, Teal #1d9e99
         comprehensive_result = self.analyze_form_comprehensive(jpeg_paths)
 
         form_structure = comprehensive_result['form_structure']
-        pdf_template = comprehensive_result['pdf_template']
 
         # Extract sections and count fields
         sections = form_structure['sections']
         total_fields = sum(len(section.get('fields', [])) for section in sections)
 
         print(f"  ✓ Extracted {len(sections)} sections with {total_fields} fields")
-        print(f"  ✓ Generated PDF template with {len(pdf_template.get('sections', []))} layout sections")
 
         # Combine results
         return FormAnalysis(
             form_name=form_structure['form_name'],
             sections=sections,
-            pdf_template=pdf_template,
             metadata={
                 "description": form_structure.get('description', ''),
                 "patient_criteria": form_structure.get('patient_criteria', ''),

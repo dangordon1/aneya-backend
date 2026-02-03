@@ -57,10 +57,10 @@ async def generate_pdf_from_react(
             format=pdf_options.get("format", "A4"),
             print_background=True,
             margin=pdf_options.get("margin", {
-                "top": "20mm",
-                "right": "15mm",
-                "bottom": "20mm",
-                "left": "15mm"
+                "top": "10mm",
+                "right": "10mm",
+                "bottom": "10mm",
+                "left": "10mm"
             }),
             landscape=pdf_options.get("landscape", False),
             prefer_css_page_size=False
@@ -124,7 +124,7 @@ def build_html_template(
     @media print {{
         @page {{
             size: A4;
-            margin: 15mm;
+            margin: 10mm;
         }}
 
         .section-break {{
@@ -156,8 +156,10 @@ def build_html_template(
     if pdf_print_css_path.exists():
         with open(pdf_print_css_path, 'r') as f:
             pdf_print_css = f.read()
+        print(f"   CSS overrides loaded: {len(pdf_print_css)} bytes from {pdf_print_css_path}")
     else:
         pdf_print_css = ""
+        print(f"   No pdf-print.css found at {pdf_print_css_path}")
 
     html = f"""
     <!DOCTYPE html>
@@ -186,6 +188,14 @@ def build_html_template(
                 document.getElementById('root').innerHTML =
                     '<h1>Error: PdfTemplates bundle not loaded. Type: ' + typeof PdfTemplates + '</h1>';
             }}
+
+            // Apply compact PDF overrides AFTER React render + Tailwind JIT
+            // Tailwind CDN generates styles after DOM scan, so we must inject last.
+            requestAnimationFrame(() => {{
+                const style = document.createElement('style');
+                style.textContent = `{pdf_print_css}`;
+                document.head.appendChild(style);
+            }});
         </script>
     </body>
     </html>

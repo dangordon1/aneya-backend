@@ -157,7 +157,7 @@ async def upload_custom_form(
     files: List[UploadFile] = File(...)
 ):
     """
-    Upload form images and extract schema + PDF template for review.
+    Upload form images and extract schema for review.
     DOES NOT save to database - returns extraction results for doctor to review.
 
     Args:
@@ -168,7 +168,7 @@ async def upload_custom_form(
         files: List of HEIC/JPEG/PNG image files
 
     Returns:
-        Extraction results with schema and PDF template for review
+        Extraction results with schema for review
     """
     try:
         user_id = get_current_user_id()
@@ -318,11 +318,11 @@ async def save_custom_form(
     authorization: str = Header(..., description="Bearer token")
 ):
     """
-    Save doctor-reviewed form schema + PDF template to database.
+    Save doctor-reviewed form schema to database.
     Called AFTER doctor has reviewed and edited the extracted schema.
 
     Args:
-        request: SaveFormRequest with reviewed schema and PDF template
+        request: SaveFormRequest with reviewed schema
         authorization: Firebase JWT token in Authorization header
 
     Returns:
@@ -755,7 +755,7 @@ async def get_custom_form(
     authorization: str = Header(..., description="Bearer token")
 ):
     """
-    Get a single custom form with full details (schema and PDF template).
+    Get a single custom form with full details.
 
     Args:
         form_id: UUID of the custom form
@@ -858,11 +858,11 @@ async def update_custom_form(
     authorization: str = Header(..., description="Bearer token")
 ):
     """
-    Update an existing custom form's schema and PDF template.
+    Update an existing custom form's schema.
 
     Args:
         form_id: UUID of the custom form to update
-        request: Updated form data (schema, pdf_template, etc.)
+        request: Updated form data (schema, metadata, etc.)
         authorization: Firebase JWT token in Authorization header
 
     Returns:
@@ -1301,6 +1301,15 @@ async def remove_form_from_library(
                 status_code=404,
                 detail="Form not found in your library"
             )
+
+        # Record dismissal so auto-adopt won't re-add this form
+        try:
+            supabase.table("doctor_dismissed_forms").upsert({
+                "doctor_id": doctor_id,
+                "form_id": form_id
+            }).execute()
+        except Exception as dismiss_err:
+            print(f"⚠️ Failed to record dismissal (form still removed): {dismiss_err}")
 
         print(f"✓ Doctor {user_id} removed form {form_id} from library")
 
