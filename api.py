@@ -918,6 +918,9 @@ async def summarize_text(request: dict = Body(...)):
         if 'clinical_summary' in result:
             cc = result['clinical_summary'].get('chief_complaint', 'N/A')
             print(f"Chief complaint: {cc[:100]}...")
+        if 'error' in result:
+            print(f"Summary error: {result.get('error')}")
+            print(f"   Details: {result.get('error_details')}")
         print(f"{'='*70}\n")
 
         # Create a simple text summary for backward compatibility with frontend
@@ -2058,6 +2061,7 @@ async def _process_final_chunk_background(
                 # Update consultation with results
                 print(f"✅ Updating consultation {consultation_id} with diarized transcript")
                 supabase.table('consultations').update({
+                    'original_transcript': formatted_transcript,
                     'consultation_text': formatted_transcript,
                     'transcription_status': 'completed',
                     'transcription_completed_at': 'now()'
@@ -5827,28 +5831,41 @@ Extract all relevant clinical data as JSON:
   }}
 }}"""
 
+        # Log inputs going into the LLM call
+        print(f"🔎 LLM INPUT — Schema hints ({len(schema_hints)} chars):\n{schema_hints[:1500]}{'...[truncated]' if len(schema_hints) > 1500 else ''}")
+        print(f"🔎 LLM INPUT — Conversation text ({len(conversation_text)} chars, {len(all_segments)} segments):\n{conversation_text[:2000]}{'...[truncated]' if len(conversation_text) > 2000 else ''}")
+        print(f"🔎 LLM INPUT — Current form state keys: {list(request.current_form_state.keys()) if request.current_form_state else '(empty)'}")
+
         # Create local Anthropic client for Claude API calls
         import anthropic
         anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
         # Use Claude to extract fields
         message = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",  # Fast, cost-effective model
-            max_tokens=2048,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=16384,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}]
         )
 
         # Parse Claude response
+        if message.stop_reason == "max_tokens":
+            print(f"⚠️  LLM response was truncated (hit max_tokens limit)")
         response_text = message.content[0].text.strip()
+        print(f"🔎 LLM OUTPUT — Raw response ({len(response_text)} chars, stop_reason={message.stop_reason}):\n{response_text[:2000]}{'...[truncated]' if len(response_text) > 2000 else ''}")
 
         # Extract JSON from response (may have markdown code blocks)
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        # Use greedy match to capture full nested JSON including inner braces
+        json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', response_text, re.DOTALL)
         if json_match:
             json_str = json_match.group(1)
         else:
-            # Try to parse the whole response as JSON
-            json_str = response_text
+            # Try to find outermost JSON object in response
+            brace_match = re.search(r'(\{.*\})', response_text, re.DOTALL)
+            if brace_match:
+                json_str = brace_match.group(1)
+            else:
+                json_str = response_text
 
         try:
             extraction_result = json.loads(json_str)
@@ -6000,21 +6017,27 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
             if user_id:
                 print(f"✅ Resolved user_id from patient_snapshot: {user_id[:8]}...")
 
-        # Step 2: Determine consultation type using existing endpoint function
-        type_request = DetermineConsultationTypeRequest(
-            diarized_segments=diarized_segments,
-            doctor_specialty=doctor_specialty,
-            patient_context={
-                'patient_id': request.patient_id,
-                'consultation_id': request.consultation_id
-            },
-            user_id=user_id
-        )
-        type_result = await determine_consultation_type(type_request)
+        # Step 2: Determine consultation type (use override if provided)
+        if request.force_consultation_type:
+            consultation_type = request.force_consultation_type
+            confidence = 1.0
+            reasoning = f"Manually overridden to: {consultation_type}"
+            print(f"📋 Using force_consultation_type override: {consultation_type}")
+        else:
+            type_request = DetermineConsultationTypeRequest(
+                diarized_segments=diarized_segments,
+                doctor_specialty=doctor_specialty,
+                patient_context={
+                    'patient_id': request.patient_id,
+                    'consultation_id': request.consultation_id
+                },
+                user_id=user_id
+            )
+            type_result = await determine_consultation_type(type_request)
 
-        consultation_type = type_result.consultation_type
-        confidence = type_result.confidence
-        reasoning = type_result.reasoning
+            consultation_type = type_result.consultation_type
+            confidence = type_result.confidence
+            reasoning = type_result.reasoning
 
         print(f"📊 Detected: {consultation_type} (confidence: {confidence:.2f})")
 
@@ -6090,7 +6113,7 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
                 'patient_id': request.patient_id,
                 'appointment_id': request.appointment_id,
                 'form_type': consultation_type,
-                'specialty': 'obstetrics_gynecology',  # Based on doctor_specialty
+                'specialty': doctor_specialty,
                 'form_data': initial_form_data,  # Pre-populated with appointment date
                 'status': 'draft',
                 'created_by': user_id,
@@ -7057,9 +7080,10 @@ def parse_diarized_transcript(transcript: str) -> list:
     """
     Parse original_transcript into diarized segments format.
 
-    Expected format:
-    [0.0s] Doctor: Hello...
-    [5.2s] Patient: Hi...
+    Supported formats:
+    1. Numbered diarized:  1. [0.00 - 4.56] speaker_0:\n     text
+    2. Timestamped:        [0.0s] Doctor: Hello...
+    3. Simple speaker:     speaker_0: text / Doctor: text
 
     Returns list of diarized segments with speaker_id, text, timestamps.
     """
@@ -7067,6 +7091,30 @@ def parse_diarized_transcript(transcript: str) -> list:
 
     if not transcript:
         return segments
+
+    # Try numbered diarized format first:  1. [0.00 - 4.56] speaker_0:\n     text
+    numbered_pattern = re.compile(
+        r'^\s*\d+\.\s*\[(\d+\.?\d*)\s*-\s*(\d+\.?\d*)\]\s*(speaker_\d+):\s*\n\s+(.+)',
+        re.MULTILINE
+    )
+    for match in numbered_pattern.finditer(transcript):
+        start_time = float(match.group(1))
+        end_time = float(match.group(2))
+        speaker = match.group(3).lower()
+        text = match.group(4).strip()
+        segments.append({
+            'start_time': start_time,
+            'end_time': end_time,
+            'speaker_id': speaker,
+            'speaker_role': speaker,
+            'text': text
+        })
+
+    if segments:
+        return segments
+
+    # Try simple speaker format: speaker_0: text
+    simple_speaker_pattern = re.compile(r'^(speaker_\d+):\s*(.+)', re.IGNORECASE)
 
     lines = transcript.split('\n')
 
@@ -7085,7 +7133,23 @@ def parse_diarized_transcript(transcript: str) -> list:
                 'speaker_role': speaker,
                 'text': text
             })
-        elif line.strip():
+            continue
+
+        # Pattern: speaker_0: text
+        simple_match = simple_speaker_pattern.match(line.strip())
+        if simple_match:
+            speaker = simple_match.group(1).lower()
+            text = simple_match.group(2).strip()
+            segments.append({
+                'start_time': 0,
+                'end_time': 0,
+                'speaker_id': speaker,
+                'speaker_role': speaker,
+                'text': text
+            })
+            continue
+
+        if line.strip():
             # No timestamp - treat as doctor speaking
             segments.append({
                 'start_time': 0,

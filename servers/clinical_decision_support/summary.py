@@ -169,6 +169,50 @@ class ConsultationSummary:
                 'text': text
             })
 
+        # Fallback: try [timestamp] Speaker: text format
+        if not conversation:
+            ts_pattern = r'\[([0-9.]+)s?\]\s*([\w_]+):\s*(.+)'
+            idx = 0
+            for line in transcript.split('\n'):
+                match = re.match(ts_pattern, line.strip())
+                if match:
+                    timestamp = float(match.group(1))
+                    speaker_raw = match.group(2)
+                    # Normalize: Speaker_1 -> speaker_1, Doctor -> doctor
+                    speaker = speaker_raw.lower()
+                    if not speaker.startswith('speaker_'):
+                        speaker = f'speaker_{speaker}'
+                    text_content = match.group(3).strip()
+                    idx += 1
+                    speakers.add(speaker)
+                    max_time = max(max_time, timestamp)
+                    conversation.append({
+                        'index': idx,
+                        'start_time': timestamp,
+                        'end_time': timestamp + 1.0,
+                        'speaker': speaker,
+                        'text': text_content
+                    })
+
+        # Fallback: try simple speaker_N: text format
+        if not conversation:
+            simple_pattern = r'^(speaker_\d+):\s*(.+)'
+            idx = 0
+            for line in transcript.split('\n'):
+                match = re.match(simple_pattern, line.strip(), re.IGNORECASE)
+                if match:
+                    idx += 1
+                    speaker = match.group(1).lower()
+                    text_content = match.group(2).strip()
+                    speakers.add(speaker)
+                    conversation.append({
+                        'index': idx,
+                        'start_time': idx - 1,
+                        'end_time': idx,
+                        'speaker': speaker,
+                        'text': text_content
+                    })
+
         return {
             'conversation': conversation,
             'duration_seconds': max_time,
@@ -331,7 +375,7 @@ class ConsultationSummary:
         try:
             message = self.anthropic.messages.create(
                 model="claude-sonnet-4-20250514",  # Latest Sonnet model
-                max_tokens=4000,
+                max_tokens=8192,
                 temperature=0.3,  # Lower temperature for more consistent medical summaries
                 messages=[{
                     "role": "user",
@@ -341,15 +385,17 @@ class ConsultationSummary:
 
             # Extract the response
             response_text = message.content[0].text
+            if message.stop_reason == 'max_tokens':
+                print(f"Warning: Claude response truncated (hit max_tokens). Response length: {len(response_text)} chars")
 
             # Parse JSON response
             # Try to extract JSON if Claude wrapped it in markdown
             if '```json' in response_text:
-                json_match = re.search(r'```json\s*(\{.+?\})\s*```', response_text, re.DOTALL)
+                json_match = re.search(r'```json\s*(\{.+\})\s*```', response_text, re.DOTALL)
                 if json_match:
                     response_text = json_match.group(1)
             elif '```' in response_text:
-                json_match = re.search(r'```\s*(\{.+?\})\s*```', response_text, re.DOTALL)
+                json_match = re.search(r'```\s*(\{.+\})\s*```', response_text, re.DOTALL)
                 if json_match:
                     response_text = json_match.group(1)
 
@@ -363,6 +409,8 @@ class ConsultationSummary:
             return summary
 
         except json.JSONDecodeError as e:
+            print(f"Summary JSON parse error: {e}")
+            print(f"Raw response (first 500 chars): {response_text[:500] if 'response_text' in locals() else 'N/A'}")
             # Fallback: return basic structure with error
             return {
                 'error': 'Failed to parse summary JSON',
@@ -375,6 +423,9 @@ class ConsultationSummary:
                 }
             }
         except Exception as e:
+            print(f"Summary generation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 'error': 'Summary generation failed',
                 'error_details': str(e),
