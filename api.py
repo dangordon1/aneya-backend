@@ -6041,7 +6041,16 @@ async def auto_fill_consultation_form(request: AutoFillConsultationFormRequest):
 
         print(f"📊 Detected: {consultation_type} (confidence: {confidence:.2f})")
 
-        # Step 2b: Immediately save detected_consultation_type to consultation record
+        # Step 2b: Check if consultation type changed (important for re-summarise debugging)
+        try:
+            existing_consultation = supabase.table('consultations').select('detected_consultation_type').eq('id', request.consultation_id).single().execute()
+            existing_type = existing_consultation.data.get('detected_consultation_type') if existing_consultation.data else None
+            if existing_type and existing_type != consultation_type:
+                print(f"⚠️  CONSULTATION TYPE CHANGED: {existing_type} -> {consultation_type} (force_type={request.force_consultation_type})")
+        except Exception:
+            pass  # Don't fail if we can't check
+
+        # Save detected_consultation_type to consultation record
         # This ensures the type is saved even if form creation fails
         try:
             supabase.table('consultations').update({
