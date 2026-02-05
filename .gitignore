@@ -59,3 +59,14 @@ htmlcov/
 .uv/
 .vercel
 aneya-backend-medical-paper-mcps/
+
+# Test data and transcripts
+*_transcript.txt
+*_transcript.json
+*_payload.json
+chunked_test_output/
+figma_pdf/
+*.tst
+
+# Database migrations (test/draft)
+supabase/migrations/*.sql
