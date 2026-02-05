@@ -9,7 +9,52 @@ from typing import Any, Tuple, Optional, Dict
 import re
 from datetime import datetime
 
-from mcp_servers.form_schemas import get_field_metadata
+from api import get_form_schema_from_db
+
+
+# ============================================
+# FIELD METADATA LOOKUP
+# ============================================
+
+def get_field_metadata(form_type: str, field_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Get metadata for a specific field path.
+
+    Args:
+        form_type: The form type (e.g., 'obgyn', 'infertility', 'antenatal', 'cardiology')
+        field_path: Field path in dot notation (e.g., 'vital_signs.systolic_bp')
+
+    Returns:
+        Dictionary containing field metadata, or None if field not found
+    """
+    schema = get_form_schema_from_db(form_type, full_metadata=False)
+
+    if '.' in field_path:
+        # Nested field (section.field_name)
+        parent, child = field_path.split('.', 1)
+        if parent in schema and isinstance(schema[parent], dict):
+            # Database schema has fields as ARRAY, not dict
+            fields_data = schema[parent].get('fields', [])
+            if isinstance(fields_data, list):
+                # Search through fields array for matching name
+                for field in fields_data:
+                    if isinstance(field, dict) and field.get('name') == child:
+                        return field
+            else:
+                # Old format (dict) for backwards compatibility
+                return fields_data.get(child)
+    else:
+        # Top-level field - search all sections
+        for section_name, section_data in schema.items():
+            if isinstance(section_data, dict):
+                fields_data = section_data.get('fields', [])
+                if isinstance(fields_data, list):
+                    for field in fields_data:
+                        if isinstance(field, dict) and field.get('name') == field_path:
+                            return field
+
+    return None
+
 
 # ============================================
 # VALIDATION FUNCTIONS

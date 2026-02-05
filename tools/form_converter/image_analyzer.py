@@ -7,6 +7,7 @@ medical form structure, fields, and relationships.
 
 import base64
 import os
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
@@ -35,7 +36,8 @@ class ImageAnalyzer:
             api_key: Anthropic API key. If None, uses ANTHROPIC_API_KEY env var.
         """
         self.client = Anthropic(api_key=api_key)
-        self.model = "claude-opus-4-5-20251101"  # Using Opus 4.5 for comprehensive extraction
+        self.model = "claude-opus-4-5-20251101"
+        self.fallback_model = "claude-sonnet-4-5-20250929"
 
     def convert_heic_to_jpeg(self, heic_path: str, output_dir: Optional[str] = None, max_size_mb: float = 3.7) -> str:
         """
@@ -541,7 +543,7 @@ Return ONLY the JSON object, no additional text. If you don't find specific rela
         import json
 
         print("\n" + "="*80)
-        print("🔍 SCHEMA EXTRACTION (Call 1/2)")
+        print("🔍 SCHEMA EXTRACTION")
         print("="*80)
 
         # Build content for ALL files (images and PDFs)
@@ -721,19 +723,41 @@ Pla    | G    |H |I           "row_names": ["Date", "Single/Multiple", "GA", "Li
 - Be thorough and complete
 - Return ONLY valid JSON, no additional text"""
 
-        # Call Opus 4.5
-        print("\n🤖 [CALL 1/2] Extracting form schema with Claude Opus 4.5...")
-        print(f"📊 Model: {self.model}")
-        print(f"📸 Processing {len(image_paths)} images")
+        # Call Claude with retry + fallback
+        models_to_try = [
+            (self.model, 2),           # Opus 4.5, then wait 2s
+            (self.fallback_model, 0),  # Sonnet 4.5 fallback
+        ]
 
-        message = self.client.messages.create(
-            model=self.model,  # claude-opus-4-5-20251101
-            max_tokens=16384,  # Maximum allowed for Opus 4.5
-            messages=[{
-                "role": "user",
-                "content": image_content + [{"type": "text", "text": prompt}]
-            }]
-        )
+        message = None
+        for attempt, (model, backoff) in enumerate(models_to_try, 1):
+            print(f"\n🤖 [Attempt {attempt}/2] Extracting form schema...")
+            print(f"📊 Model: {model}")
+            print(f"📸 Processing {len(image_paths)} images")
+            try:
+                message = self.client.messages.create(
+                    model=model,
+                    max_tokens=16384,
+                    messages=[{
+                        "role": "user",
+                        "content": image_content + [{"type": "text", "text": prompt}]
+                    }]
+                )
+                print(f"✅ Success with {model}")
+                break
+            except Exception as e:
+                if "529" in str(e) or "overloaded" in str(e).lower():
+                    print(f"⚠️  {model} returned 529 Overloaded (attempt {attempt}/3)")
+                    if attempt < len(models_to_try):
+                        print(f"   Retrying in {backoff}s...")
+                        time.sleep(backoff)
+                    else:
+                        raise
+                else:
+                    raise
+
+        if message is None:
+            raise Exception("All model attempts failed")
 
         # Parse response
         response_text = message.content[0].text
