@@ -945,6 +945,7 @@ async def summarize_text(request: dict = Body(...)):
             "analysis_result": None,
             "diagnoses": [],
             "guidelines_found": [],
+            "prescriptions": result.get('prescriptions', []),
 
             # Metadata
             "consultation_duration_seconds": result.get('metadata', {}).get('consultation_duration_seconds'),
